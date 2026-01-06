@@ -1,5 +1,11 @@
 package me.aap.fermata.vfs;
 
+import static android.view.ViewGroup.LayoutParams.MATCH_PARENT;
+import static me.aap.utils.async.Completed.cancelled;
+import static me.aap.utils.async.Completed.completedNull;
+import static me.aap.utils.async.Completed.completedVoid;
+import static me.aap.utils.ui.activity.ActivityListener.FRAGMENT_CONTENT_CHANGED;
+
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
@@ -22,12 +28,6 @@ import me.aap.utils.vfs.VirtualFileSystem;
 import me.aap.utils.vfs.VirtualFolder;
 import me.aap.utils.vfs.VirtualResource;
 
-import static android.view.ViewGroup.LayoutParams.MATCH_PARENT;
-import static me.aap.utils.async.Completed.cancelled;
-import static me.aap.utils.async.Completed.completedNull;
-import static me.aap.utils.async.Completed.completedVoid;
-import static me.aap.utils.ui.activity.ActivityListener.FRAGMENT_CONTENT_CHANGED;
-
 /**
  * @author Andrey Pavlenko
  */
@@ -35,16 +35,16 @@ public abstract class VfsProviderBase implements VfsProvider {
 	@SuppressWarnings({"FieldCanBeLocal", "unused"})
 	private PreferenceStore.Listener prefsListener;
 
-	protected FutureSupplier<VirtualFolder> addFolder(MainActivityDelegate a, VirtualFileSystem fs) {
+	protected FutureSupplier<? extends VirtualResource> addFolder(MainActivityDelegate a, VirtualFileSystem fs) {
 		return completedNull();
 	}
 
-	protected FutureSupplier<Void> removeFolder(MainActivityDelegate a, VirtualFileSystem fs, VirtualFolder folder) {
+	protected FutureSupplier<Void> removeFolder(MainActivityDelegate a, VirtualFileSystem fs, VirtualResource folder) {
 		return completedVoid();
 	}
 
 	@Override
-	public FutureSupplier<VirtualFolder> select(MainActivityDelegate a, List<VirtualFileSystem> fs) {
+	public FutureSupplier<? extends VirtualResource> select(MainActivityDelegate a, List<? extends VirtualFileSystem> fs) {
 		if (fs.isEmpty()) return Completed.failed(new VfsException("No file system found"));
 
 		VirtualFileSystem f = fs.get(0);
@@ -52,8 +52,8 @@ public abstract class VfsProviderBase implements VfsProvider {
 		a.setContentLoading(getRoots);
 		return getRoots.main().then(roots -> {
 			if (roots.isEmpty() && addRemoveSupported()) {
-				return addFolder(a, f).then(folder -> {
-					if (folder != null) {
+				return addFolder(a, f).then(r -> {
+					if (r instanceof VirtualFolder folder) {
 						return folder.getChildren().main().then(c -> pickFolder(a, f, folder, c));
 					} else {
 						return cancelled();
@@ -65,14 +65,15 @@ public abstract class VfsProviderBase implements VfsProvider {
 		});
 	}
 
-	protected FutureSupplier<VirtualFolder> pickFolder(
+	protected FutureSupplier<VirtualResource> pickFolder(
 			MainActivityDelegate a, VirtualFileSystem fs, VirtualResource parent,
 			List<? extends VirtualResource> children) {
-		Promise<VirtualFolder> p = new Promise<>();
-		FilePickerFragment f = a.showFragment(R.id.file_picker);
+		if (!(a.showFragment(me.aap.utils.R.id.file_picker) instanceof FilePickerFragment f))
+			return cancelled();
+		Promise<VirtualResource> p = new Promise<>();
 		f.setMode(FilePickerFragment.FOLDER);
 		f.setResources(parent, children);
-		f.setFileConsumer(r -> p.complete((VirtualFolder) r));
+		f.setFileConsumer(p::complete);
 
 		if (addRemoveSupported()) {
 			f.setCreateFolder(new FilePickerFragment.CreateFolder() {
@@ -98,7 +99,7 @@ public abstract class VfsProviderBase implements VfsProvider {
 					b.addItem(R.id.folders_remove, R.drawable.remove_folder, R.string.remove_folder);
 					b.setSelectionHandler(i -> {
 						if (i.getItemId() != R.id.folders_remove) return false;
-						removeFolder(a, fs, (VirtualFolder) item).thenRun(() -> f.setFileSystem(fs));
+						removeFolder(a, fs, item).thenRun(() -> f.setFileSystem(fs));
 						return true;
 					});
 				});
@@ -110,26 +111,59 @@ public abstract class VfsProviderBase implements VfsProvider {
 		return p;
 	}
 
+	protected String getTitle(MainActivityDelegate a) {
+		return a.getString(R.string.add_folder);
+	}
+
+	protected String getTitle(MainActivityDelegate a, PreferenceViewAdapter adapter) {
+		PreferenceSet p = adapter.getPreferenceSet();
+		if (p.getParent() != null) return a.getString(p.get().title);
+		else return getTitle(a);
+	}
+
+	protected boolean onBackPressed(PreferenceViewAdapter adapter) {
+		PreferenceSet p = adapter.getPreferenceSet();
+		if (p.getParent() != null) {
+			adapter.setPreferenceSet(p.getParent());
+			return true;
+		}
+		return false;
+	}
+
 	protected FutureSupplier<Boolean> requestPrefs(
 			MainActivityDelegate a, PreferenceSet prefs, PreferenceStore ps) {
-		GenericDialogFragment f = a.showFragment(me.aap.utils.R.id.generic_dialog_fragment);
-		f.setTitle(a.getString(R.string.add_folder));
+		if (!(a.showFragment(
+				me.aap.utils.R.id.generic_dialog_fragment) instanceof GenericDialogFragment f))
+			return cancelled();
+		Promise<Boolean> promise = new Promise<>();
+		PreferenceViewAdapter adapter = new PreferenceViewAdapter(prefs) {
+			@Override
+			public void setPreferenceSet(PreferenceSet set) {
+				super.setPreferenceSet(set);
+				f.setTitle(getTitle(a, this));
+				a.fireBroadcastEvent(FRAGMENT_CONTENT_CHANGED);
+			}
+		};
+		f.setTitle(getTitle(a, adapter));
 		f.setContentProvider(g -> {
 			RecyclerView v = new RecyclerView(g.getContext());
 			v.setLayoutParams(new RecyclerView.LayoutParams(MATCH_PARENT, MATCH_PARENT));
 			v.setHasFixedSize(true);
 			v.setLayoutManager(new LinearLayoutManager(g.getContext()));
-			v.setAdapter(new PreferenceViewAdapter(prefs));
+			v.setAdapter(adapter);
 			g.addView(v);
 		});
 		f.setDialogValidator(() -> validate(ps));
+		f.setBackHandler(() -> {
+			promise.cancel();
+			return (a.getActiveFragment() != f) || onBackPressed(adapter);
+		});
 
 		ps.addBroadcastListener(prefsListener = (s, p) ->
 				f.getToolBarMediator().onActivityEvent(a.getToolBar(), a, FRAGMENT_CONTENT_CHANGED));
 
-		Promise<Boolean> p = new Promise<>();
-		f.setDialogConsumer(p::complete);
-		return p;
+		f.setDialogConsumer(promise::complete);
+		return promise;
 	}
 
 	protected boolean validate(PreferenceStore ps) {

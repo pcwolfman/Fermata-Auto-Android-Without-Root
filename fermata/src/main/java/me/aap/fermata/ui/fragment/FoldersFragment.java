@@ -1,8 +1,22 @@
 package me.aap.fermata.ui.fragment;
 
+import static android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION;
+import static android.os.Build.VERSION.SDK_INT;
+import static me.aap.fermata.BuildConfig.ENABLE_GS;
+import static me.aap.fermata.util.Utils.isSafSupported;
+import static me.aap.fermata.vfs.FermataVfsManager.GDRIVE_ID;
+import static me.aap.fermata.vfs.FermataVfsManager.M3U_ID;
+import static me.aap.fermata.vfs.FermataVfsManager.SFTP_ID;
+import static me.aap.fermata.vfs.FermataVfsManager.SMB_ID;
+import static me.aap.utils.async.Completed.completed;
+import static me.aap.utils.function.ResultConsumer.Cancel.isCancellation;
+
+import android.Manifest;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.net.Uri;
+import android.os.Build;
+import android.view.View;
 import android.view.animation.Animation;
 import android.view.animation.AnimationUtils;
 
@@ -11,18 +25,15 @@ import androidx.annotation.StringRes;
 
 import com.google.android.play.core.install.InstallException;
 
-import java.util.ArrayList;
 import java.util.List;
 
 import me.aap.fermata.R;
 import me.aap.fermata.media.lib.MediaLib.BrowsableItem;
 import me.aap.fermata.media.lib.MediaLib.Folders;
 import me.aap.fermata.media.lib.MediaLib.Item;
-import me.aap.fermata.media.lib.MediaLib.PlayableItem;
 import me.aap.fermata.media.pref.FoldersPrefs;
 import me.aap.fermata.media.service.FermataServiceUiBinder;
 import me.aap.fermata.ui.activity.MainActivityDelegate;
-import me.aap.fermata.ui.view.MediaItemWrapper;
 import me.aap.fermata.vfs.FermataVfsManager;
 import me.aap.utils.app.App;
 import me.aap.utils.async.FutureSupplier;
@@ -33,19 +44,10 @@ import me.aap.utils.ui.fragment.ActivityFragment;
 import me.aap.utils.ui.fragment.FilePickerFragment;
 import me.aap.utils.ui.menu.OverlayMenu;
 import me.aap.utils.ui.menu.OverlayMenuItem;
+import me.aap.utils.ui.view.FloatingButton;
 import me.aap.utils.vfs.VirtualFileSystem;
-import me.aap.utils.vfs.VirtualFolder;
 import me.aap.utils.vfs.VirtualResource;
 import me.aap.utils.vfs.local.LocalFileSystem;
-
-import static android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION;
-import static java.util.Objects.requireNonNull;
-import static me.aap.fermata.vfs.FermataVfsManager.GDRIVE_ID;
-import static me.aap.fermata.vfs.FermataVfsManager.SFTP_ID;
-import static me.aap.fermata.vfs.FermataVfsManager.SMB_ID;
-import static me.aap.utils.async.Completed.completed;
-import static me.aap.utils.collection.CollectionUtils.filterMap;
-import static me.aap.utils.function.ResultConsumer.Cancel.isCancellation;
 
 /**
  * @author Andrey Pavlenko
@@ -53,7 +55,7 @@ import static me.aap.utils.function.ResultConsumer.Cancel.isCancellation;
 public class FoldersFragment extends MediaLibFragment {
 
 	@Override
-	ListAdapter createAdapter(FermataServiceUiBinder b) {
+	protected ListAdapter createAdapter(FermataServiceUiBinder b) {
 		return new FoldersAdapter(getMainActivity(), b.getLib().getFolders());
 	}
 
@@ -73,64 +75,38 @@ public class FoldersFragment extends MediaLibFragment {
 			builder.addItem(R.id.folders_add, R.drawable.add_folder, R.string.add_folder)
 					.setHandler(this::navBarMenuItemSelected);
 		} else {
+			super.contributeToNavBarMenu(builder);
 			FoldersAdapter a = getAdapter();
-			OverlayMenu.Builder b = builder.withSelectionHandler(this::navBarMenuItemSelected);
-			b.addItem(R.id.refresh, R.drawable.refresh, R.string.refresh);
-			b.addItem(R.id.rescan, R.drawable.loading, R.string.rescan);
 
-			if (!a.hasSelectable()) return;
-
-			if (a.getListView().isSelectionActive()) {
-				boolean hasSelected = a.hasSelected();
-
-				b.addItem(R.id.nav_select_all, R.drawable.check_box, R.string.select_all);
-				b.addItem(R.id.nav_unselect_all, R.drawable.check_box_blank, R.string.unselect_all);
-
-				if (hasSelected) {
-					b.addItem(R.id.favorites_add, R.drawable.favorite, R.string.favorites_add);
-					getMainActivity().addPlaylistMenu(b, completed(a.getSelectedItems()));
-				}
-			} else {
-				b.addItem(R.id.nav_select, R.drawable.check_box, R.string.select);
+			if (a.getListView().isSelectionActive() && a.hasSelectable() && a.hasSelected()) {
+				OverlayMenu.Builder b = builder.withSelectionHandler(this::navBarMenuItemSelected);
+				b.addItem(R.id.favorites_add, R.drawable.favorite, R.string.favorites_add);
+				getMainActivity().addPlaylistMenu(b, completed(a.getSelectedItems()));
 			}
 		}
-
-		super.contributeToNavBarMenu(builder);
 	}
 
-	private boolean navBarMenuItemSelected(OverlayMenuItem item) {
-		switch (item.getItemId()) {
-			case R.id.folders_add:
-				addFolder();
-				return true;
-			case R.id.nav_select:
-			case R.id.nav_select_all:
-				getAdapter().getListView().select(true);
-				return true;
-			case R.id.nav_unselect_all:
-				getAdapter().getListView().select(false);
-				return true;
-			case R.id.favorites_add:
-				requireNonNull(getLib()).getFavorites().addItems(filterMap(getAdapter().getList(),
-						MediaItemWrapper::isSelected, (i, w, l) -> l.add((PlayableItem) w.getItem()),
-						ArrayList::new));
-				discardSelection();
-				MediaLibFragment f = getMainActivity().getMediaLibFragment(R.id.favorites_fragment);
-				if (f != null) f.reload();
-				return true;
-			case R.id.refresh:
-				refresh();
-				return true;
-			case R.id.rescan:
-				rescan();
-				return true;
+	protected boolean navBarMenuItemSelected(OverlayMenuItem item) {
+		int itemId = item.getItemId();
+		if (itemId == R.id.folders_add) {
+			addFolder();
+			return true;
 		}
-
-		return false;
+		return super.navBarMenuItemSelected(item);
 	}
 
 	public void navBarItemReselected(int itemId) {
 		getAdapter().setParent(getLib().getFolders());
+	}
+
+	@Override
+	protected boolean isRefreshSupported() {
+		return true;
+	}
+
+	@Override
+	protected boolean isRescanSupported() {
+		return true;
 	}
 
 	@Override
@@ -154,44 +130,56 @@ public class FoldersFragment extends MediaLibFragment {
 		menu.show(b -> {
 			b.setTitle(R.string.add_folder);
 			b.setSelectionHandler(this::addFolder);
-			if (!a.isCarActivity()) b.addItem(R.id.vfs_content, R.string.vfs_content);
-			b.addItem(R.id.vfs_file_system, R.string.vfs_file_system);
+			if (isSafSupported(a)) {
+				if ((SDK_INT < Build.VERSION_CODES.TIRAMISU) ||
+						App.get().hasManifestPermission(Manifest.permission.MANAGE_EXTERNAL_STORAGE)) {
+					b.addItem(R.id.vfs_file_system, R.string.vfs_file_system);
+				}
+				b.addItem(R.id.vfs_content, R.string.vfs_content);
+			} else {
+				b.addItem(R.id.vfs_file_system, R.string.vfs_file_system);
+			}
 			b.addItem(R.id.vfs_sftp, R.string.vfs_sftp);
 			b.addItem(R.id.vfs_smb, R.string.vfs_smb);
-			b.addItem(R.id.vfs_gdrive, R.string.vfs_gdrive);
+			if (ENABLE_GS) b.addItem(R.id.vfs_gdrive, R.string.vfs_gdrive);
+			b.addItem(R.id.m3u_playlist, R.string.m3u_playlist);
 		});
 	}
 
 	private boolean addFolder(OverlayMenuItem item) {
-		switch (item.getItemId()) {
-			case R.id.vfs_content:
-				addFolderIntent();
-				return true;
-			case R.id.vfs_file_system:
-				addFolderPicker();
-				return true;
-			case R.id.vfs_gdrive:
-				addFolderVfs(GDRIVE_ID, R.string.vfs_gdrive);
-				return true;
-			case R.id.vfs_sftp:
-				addFolderVfs(SFTP_ID, R.string.vfs_sftp);
-				return true;
-			case R.id.vfs_smb:
-				addFolderVfs(SMB_ID, R.string.vfs_smb);
-				return true;
-			default:
-				return false;
+		int itemId = item.getItemId();
+
+		if (itemId == R.id.vfs_file_system) {
+			addFolderPicker();
+			return true;
+		} else if (itemId == R.id.vfs_content) {
+			addFolderIntent();
+			return true;
+		} else if (ENABLE_GS && (itemId == R.id.vfs_gdrive)) {
+			addFolderVfs(GDRIVE_ID, R.string.vfs_gdrive);
+			return true;
+		} else if (itemId == R.id.vfs_sftp) {
+			addFolderVfs(SFTP_ID, R.string.vfs_sftp);
+			return true;
+		} else if (itemId == R.id.vfs_smb) {
+			addFolderVfs(SMB_ID, R.string.vfs_smb);
+			return true;
+		} else if (itemId == R.id.m3u_playlist) {
+			addFolderVfs(M3U_ID, R.string.m3u_playlist);
+			return true;
 		}
+
+		return false;
 	}
 
 	private void addFolderIntent() {
 		try {
-			Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
-			getMainActivity().startActivityForResult(intent).onSuccess(this::addFolderResult);
+			getMainActivity().startActivityForResult(() -> new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE))
+					.onSuccess(this::addFolderResult);
 		} catch (ActivityNotFoundException ex) {
 			String msg = ex.getLocalizedMessage();
-			UiUtils.showAlert(getContext(), getString(R.string.err_failed_add_folder,
-					(msg != null) ? msg : ex.toString()));
+			UiUtils.showAlert(getContext(),
+					getString(R.string.err_failed_add_folder, (msg != null) ? msg : ex.toString()));
 		}
 	}
 
@@ -200,19 +188,22 @@ public class FoldersFragment extends MediaLibFragment {
 	}
 
 	private void addFolderPicker(VirtualFileSystem fs) {
-		FilePickerFragment f = getMainActivity().showFragment(R.id.file_picker);
+		if (!(getMainActivity().showFragment(
+				me.aap.utils.R.id.file_picker) instanceof FilePickerFragment f)) return;
 		f.setMode(FilePickerFragment.FOLDER);
 		f.setFileSystem(fs);
 		f.setFileConsumer(this::addFolderResult);
 	}
 
+	public boolean canScrollUp() {
+		View v = getView();
+		return (v != null) && (v.getScrollY() > 0);
+	}
+
 	private void addFolderVfs(String provId, @StringRes int name) {
 		FermataVfsManager mgr = getLib().getVfsManager();
-		mgr.getProvider(provId)
-				.then(p -> p.select(getMainActivity(), mgr.getFileSystems(provId)))
-				.main()
-				.onFailure(fail -> failedToLoadModule(name, fail))
-				.onSuccess(this::addFolderResult);
+		mgr.getProvider(provId).then(p -> p.select(getMainActivity(), mgr.getFileSystems(provId)))
+				.main().onFailure(fail -> failedToLoadModule(name, fail)).onSuccess(this::addFolderResult);
 	}
 
 	private void failedToLoadModule(@StringRes int name, Throwable ex) {
@@ -221,14 +212,14 @@ public class FoldersFragment extends MediaLibFragment {
 
 		App.get().getHandler().post(() -> {
 			String n = getString(name);
-			Log.e(ex, "Failed to load add folder: ", name);
+			Log.e(ex, "Failed to add folder: ", name);
 
 			if (ex instanceof InstallException) {
 				UiUtils.showAlert(getContext(), getString(R.string.err_failed_install_module, n));
 			} else {
 				String msg = ex.getLocalizedMessage();
-				UiUtils.showAlert(getContext(), getString(R.string.err_failed_add_folder,
-						(msg != null) ? msg : ex.toString()));
+				UiUtils.showAlert(getContext(),
+						getString(R.string.err_failed_add_folder, (msg != null) ? msg : ex.toString()));
 			}
 		});
 	}
@@ -239,21 +230,23 @@ public class FoldersFragment extends MediaLibFragment {
 		Uri uri = data.getData();
 		if (uri == null) return;
 
-		MainActivityDelegate a = getMainActivity();
-		requireNonNull(a.getContext()).getContentResolver()
-				.takePersistableUriPermission(uri, FLAG_GRANT_READ_URI_PERMISSION);
-		Folders folders = getLib().getFolders();
-		folders.addItem(uri).main().thenRun(() -> getAdapter().setParent(folders));
+		getMainActivityDelegate().onSuccess(a -> {
+			a.getContext().getContentResolver()
+					.takePersistableUriPermission(uri, FLAG_GRANT_READ_URI_PERMISSION);
+			Folders folders = getLib().getFolders();
+			folders.addItem(uri).main().thenRun(() -> getAdapter().setParent(folders));
+		});
 	}
 
-	private void addFolderResult(VirtualResource folder) {
-		MainActivityDelegate a = getMainActivity();
-		if (folder instanceof VirtualFolder) {
-			Folders folders = a.getLib().getFolders();
-			folders.addItem(folder.getRid().toAndroidUri()).main()
-					.thenRun(() -> getAdapter().setParent(folders));
-		}
-		a.showFragment(getFragmentId());
+	private void addFolderResult(VirtualResource r) {
+		getMainActivityDelegate().onSuccess(a -> {
+			if (r != null) {
+				Folders folders = a.getLib().getFolders();
+				folders.addItem(r.getRid().toAndroidUri()).main()
+						.thenRun(() -> getAdapter().setParent(folders));
+			}
+			a.showFragment(getFragmentId());
+		});
 	}
 
 	@Override
@@ -294,10 +287,6 @@ public class FoldersFragment extends MediaLibFragment {
 			return isRootFolder();
 		}
 
-		public boolean isItemViewSwipeEnabled() {
-			return isRootFolder();
-		}
-
 		@Override
 		protected void onItemDismiss(int position) {
 			BrowsableItem i = getAdapter().getParent();
@@ -318,8 +307,11 @@ public class FoldersFragment extends MediaLibFragment {
 			parent.getUnsortedChildren().onSuccess(c -> {
 				if (!c.isEmpty()) return;
 
-				Animation shake = AnimationUtils.loadAnimation(getContext(), me.aap.utils.R.anim.shake_y_20);
-				getMainActivity().getFloatingButton().startAnimation(shake);
+				FloatingButton fb = getMainActivity().getFloatingButton();
+				fb.requestFocus();
+				Animation shake =
+						AnimationUtils.loadAnimation(getContext(), me.aap.utils.R.anim.shake_y_20);
+				fb.startAnimation(shake);
 			});
 		}
 	}

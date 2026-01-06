@@ -1,36 +1,49 @@
 package me.aap.fermata.media.lib;
 
+import static me.aap.utils.async.Completed.completed;
+import static me.aap.utils.async.Completed.completedEmptyList;
+import static me.aap.utils.async.Completed.completedNull;
+import static me.aap.utils.async.Completed.completedVoid;
+import static me.aap.utils.async.Completed.failed;
+
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.support.v4.media.MediaBrowserCompat.MediaItem;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 
 import java.lang.ref.ReferenceQueue;
 import java.lang.ref.WeakReference;
+import java.lang.reflect.Field;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import me.aap.fermata.BuildConfig;
+import me.aap.fermata.addon.AddonManager;
 import me.aap.fermata.media.engine.MediaEngineManager;
 import me.aap.fermata.media.engine.MetadataRetriever;
 import me.aap.fermata.media.pref.BrowsableItemPrefs;
 import me.aap.fermata.media.pref.MediaLibPrefs;
+import me.aap.fermata.media.pref.PlayableItemPrefs;
+import me.aap.fermata.media.pref.StreamItemPrefs;
 import me.aap.fermata.vfs.FermataVfsManager;
 import me.aap.utils.async.Async;
 import me.aap.utils.async.FutureSupplier;
 import me.aap.utils.collection.CollectionUtils;
 import me.aap.utils.event.BasicEventBroadcaster;
+import me.aap.utils.function.Consumer;
+import me.aap.utils.function.Function;
 import me.aap.utils.log.Log;
 import me.aap.utils.pref.PreferenceStore;
 import me.aap.utils.pref.SharedPreferenceStore;
-
-import static me.aap.utils.async.Completed.completed;
-import static me.aap.utils.async.Completed.completedEmptyList;
-import static me.aap.utils.async.Completed.completedNull;
+import me.aap.utils.vfs.VirtualResource;
 
 /**
  * @author Andrey Pavlenko
@@ -47,15 +60,18 @@ public class DefaultMediaLib extends BasicEventBroadcaster<PreferenceStore.Liste
 	private final MetadataRetriever metadataRetriever;
 	private final Map<String, WeakRef<Item>> itemCache = new HashMap<>();
 	private final ReferenceQueue<Item> itemRefQueue = new ReferenceQueue<>();
+	@Nullable
+	private final AtvInterface atvInterface;
 
 	public DefaultMediaLib(Context ctx) {
 		this.ctx = ctx;
 		sharedPreferences = ctx.getSharedPreferences("medialib", Context.MODE_PRIVATE);
+		mediaEngineManager = new MediaEngineManager(this);
+		metadataRetriever = new MetadataRetriever(mediaEngineManager);
 		folders = new DefaultFolders(this);
 		favorites = new DefaultFavorites(this);
 		playlists = new DefaultPlaylists(this);
-		mediaEngineManager = new MediaEngineManager(this);
-		metadataRetriever = new MetadataRetriever(mediaEngineManager);
+		atvInterface = AtvInterface.create(this);
 		addBroadcastListener(this);
 	}
 
@@ -84,7 +100,7 @@ public class DefaultMediaLib extends BasicEventBroadcaster<PreferenceStore.Liste
 
 	@NonNull
 	@Override
-	public FutureSupplier<Item> getItem(CharSequence itemId) {
+	public FutureSupplier<? extends Item> getItem(CharSequence itemId) {
 		String id = itemId.toString();
 		Item i = getFromCache(id);
 		if (i != null) return completed(i);
@@ -100,31 +116,60 @@ public class DefaultMediaLib extends BasicEventBroadcaster<PreferenceStore.Liste
 				case DefaultPlaylists.ID:
 					return completed(getPlaylists());
 				default:
-					return completedNull();
+					FutureSupplier<? extends Item> ai = AddonManager.get().getItem(this, null, id);
+					return (ai != null) ? ai : completedNull();
 			}
 		}
 
-		switch (id.substring(0, idx)) {
-			case FileItem.SCHEME:
-				return FileItem.create(this, id);
-			case FolderItem.SCHEME:
-				return FolderItem.create(this, id);
-			case CueItem.SCHEME:
-				return CueItem.create(this, id);
-			case CueTrackItem.SCHEME:
-				return CueTrackItem.create(this, id);
-			case M3uItem.SCHEME:
-				return M3uItem.create(this, id);
-			case M3uGroupItem.SCHEME:
-				return M3uGroupItem.create(this, id);
-			case M3uTrackItem.SCHEME:
-				return M3uTrackItem.create(this, id);
-			case DefaultFavorites.SCHEME:
-				return getFavorites().getItem(id);
-			case DefaultPlaylists.SCHEME:
-				return getPlaylists().getItem(id);
-			default:
-				return completedNull();
+		try {
+			String scheme = id.substring(0, idx);
+
+			switch (scheme) {
+				case FileItem.SCHEME:
+					return FileItem.create(this, id);
+				case FolderItem.SCHEME:
+					return FolderItem.create(this, id);
+				case CueItem.SCHEME:
+					return CueItem.create(this, id);
+				case CueTrackItem.SCHEME:
+					return CueTrackItem.create(this, id);
+				case M3uItem.SCHEME:
+					return M3uItem.create(this, id);
+				case M3uGroupItem.SCHEME:
+					return M3uGroupItem.create(this, id);
+				case M3uTrackItem.SCHEME:
+					return M3uTrackItem.create(this, id);
+				case DefaultFavorites.SCHEME:
+					return getFavorites().getItem(id);
+				case DefaultPlaylists.SCHEME:
+					return getPlaylists().getItem(id);
+				default:
+					FutureSupplier<? extends Item> ai = AddonManager.get().getItem(this, scheme, id);
+					return (ai != null) ? ai : completedNull();
+			}
+		} catch (Throwable ex) {
+			return failed(ex);
+		}
+	}
+
+	@Nullable
+	@Override
+	public Item getCachedItem(CharSequence id) {
+		synchronized (cacheLock()) {
+			return getFromCache(id.toString());
+		}
+	}
+
+	@Nullable
+	@Override
+	public Item getOrCreateCachedItem(CharSequence id, Function<String, ? extends Item> create) {
+		synchronized (cacheLock()) {
+			String iid = id.toString();
+			Item i = getFromCache(iid);
+			if (i != null) return i;
+			i = create.apply(iid);
+			itemCache.put(iid, new WeakRef<>(id, i, itemRefQueue));
+			return i;
 		}
 	}
 
@@ -137,8 +182,7 @@ public class DefaultMediaLib extends BasicEventBroadcaster<PreferenceStore.Liste
 			getLastPlayedItem().then(i -> (i == null) ? completedNull() : i.asMediaItem())
 					.onSuccess(i -> {
 						if (i != null) items.add(i);
-					})
-					.then(v -> getFolders().asMediaItem()).onSuccess(items::add)
+					}).then(v -> getFolders().asMediaItem()).onSuccess(items::add)
 					.then(v -> getFavorites().asMediaItem()).onSuccess(items::add)
 					.then(v -> getPlaylists().asMediaItem()).onSuccess(items::add)
 					.onCompletion((r, f) -> result.sendResult(items, null)).onFailure(this::log);
@@ -160,15 +204,23 @@ public class DefaultMediaLib extends BasicEventBroadcaster<PreferenceStore.Liste
 	@Override
 	public void getItem(String itemId, MediaLibResult<MediaItem> result) {
 		result.detach();
-		getItem(itemId)
-				.then(Item::asMediaItem)
-				.onFailure(this::log)
+		getItem(itemId).then(Item::asMediaItem).onFailure(this::log)
 				.onCompletion((i, f) -> result.sendResult(i, null));
 	}
 
 	@Override
 	public void search(String query, MediaLibResult<List<MediaItem>> result) {
-		// TODO Implement
+		getMetadataRetriever().queryId(query).onCompletion((id, err) -> {
+			if (id != null) {
+				getItem(id).onCompletion((i, err1) -> {
+					if (i == null) result.sendResult(Collections.emptyList(), null);
+					else i.asMediaItem().onCompletion((mi, err2) -> result.sendResult(
+							(mi == null) ? Collections.emptyList() : Collections.singletonList(mi), null));
+				});
+			} else {
+				result.sendResult(Collections.emptyList(), null);
+			}
+		});
 	}
 
 	@NonNull
@@ -185,61 +237,11 @@ public class DefaultMediaLib extends BasicEventBroadcaster<PreferenceStore.Liste
 
 	@Override
 	public long getLastPlayedPosition(PlayableItem i) {
-		if (i.isVideo()) return i.getPrefs().getPositionPref();
+		long pos = i.getPrefs().getPositionPref();
+		if ((pos != 0) || i.isVideo()) return pos;
 		BrowsableItemPrefs p = i.getParent().getPrefs();
 		String id = p.getLastPlayedItemPref();
 		return ((id != null) && id.equals(i.getId())) ? p.getLastPlayedPosPref() : 0;
-	}
-
-	@Override
-	public void setLastPlayed(PlayableItem i, long position) {
-		if (i.isExternal()) return;
-
-		i.getDuration().main().onSuccess(dur -> {
-			String id;
-			BrowsableItemPrefs p;
-
-			if (dur <= 0) {
-				id = i.getId();
-				p = i.getParent().getPrefs();
-				setLastPlayedItemPref(id);
-				setLastPlayedPosPref(0);
-				p.setLastPlayedItemPref(id);
-				p.setLastPlayedPosPref(0);
-				return;
-			}
-
-			if ((dur - position) <= 1000) {
-				i.getNextPlayable().onCompletion((next, fail) -> {
-					if (next == null) next = i;
-
-					String nextId = next.getId();
-					BrowsableItemPrefs nextPrefs = next.getParent().getPrefs();
-					setLastPlayedItemPref(nextId);
-					setLastPlayedPosPref(0);
-					nextPrefs.setLastPlayedItemPref(nextId);
-					nextPrefs.setLastPlayedPosPref(0);
-				});
-
-				return;
-			} else {
-				id = i.getId();
-				p = i.getParent().getPrefs();
-			}
-
-			if (i.isVideo()) {
-				if (position > (dur * 0.9f)) {
-					i.getPrefs().setWatchedPref(true);
-				} else {
-					i.getPrefs().setPositionPref(position);
-				}
-			}
-
-			setLastPlayedItemPref(id);
-			setLastPlayedPosPref(position);
-			p.setLastPlayedItemPref(id);
-			p.setLastPlayedPosPref(position);
-		});
 	}
 
 	@NonNull
@@ -278,6 +280,10 @@ public class DefaultMediaLib extends BasicEventBroadcaster<PreferenceStore.Liste
 		return metadataRetriever;
 	}
 
+	public void getAtvInterface(Consumer<AtvInterface> c) {
+		if (atvInterface != null) c.accept(atvInterface);
+	}
+
 	@Override
 	public void onPreferenceChanged(PreferenceStore store, List<Pref<?>> prefs) {
 		if (prefs.contains(BrowsableItemPrefs.SHOW_TRACK_ICONS)) {
@@ -292,19 +298,24 @@ public class DefaultMediaLib extends BasicEventBroadcaster<PreferenceStore.Liste
 		}
 	}
 
-	Object cacheLock() {
+	public Object cacheLock() {
 		return itemCache;
 	}
 
 	void addToCache(Item i) {
 		synchronized (itemCache) {
 			clearRefs(itemCache, itemRefQueue);
-			if (BuildConfig.DEBUG && itemCache.containsKey(i.getId())) throw new AssertionError();
-			itemCache.put(i.getId(), new WeakRef<>(i.getId(), i, itemRefQueue));
+			String id = i.getId();
+			if (BuildConfig.D && itemCache.containsKey(id)) {
+				throw new AssertionError(
+						"Unable to add item " + i + ". Item with id=" + id + "already exists: " +
+								itemCache.get(id));
+			}
+			itemCache.put(id, new WeakRef<>(id, i, itemRefQueue));
 		}
 	}
 
-	void removeFromCache(Item i) {
+	public void removeFromCache(Item i) {
 		synchronized (itemCache) {
 			clearRefs(itemCache, itemRefQueue);
 			if (i == null) return;
@@ -316,7 +327,7 @@ public class DefaultMediaLib extends BasicEventBroadcaster<PreferenceStore.Liste
 		}
 	}
 
-	Item getFromCache(String id) {
+	public Item getFromCache(String id) {
 		synchronized (itemCache) {
 			clearRefs(itemCache, itemRefQueue);
 			WeakRef<Item> r = itemCache.get(id);
@@ -329,6 +340,62 @@ public class DefaultMediaLib extends BasicEventBroadcaster<PreferenceStore.Liste
 		}
 
 		return null;
+	}
+
+	@Override
+	public void clearCache() {
+		synchronized (itemCache) {
+			clearRefs(itemCache, itemRefQueue);
+		}
+	}
+
+	public void cleanUpPrefs() {
+		metadataRetriever.getBitmapCache().cleanUpPrefs();
+		SharedPreferences prefs = getSharedPreferences();
+		List<String> keys = new ArrayList<>(prefs.getAll().keySet());
+		Set<String> names = new HashSet<>();
+		getPrefNames(PlayableItemPrefs.class, names);
+		getPrefNames(BrowsableItemPrefs.class, names);
+		getPrefNames(StreamItemPrefs.class, names);
+
+		Async.forEach(k -> {
+			int idx = k.lastIndexOf('#');
+
+			if ((idx <= 0) || (idx == k.length() - 1) || !names.contains(k.substring(idx + 1))) {
+				return completedVoid();
+			} else {
+				return getItem(k.substring(0, idx)).then(i -> {
+					if (i == null) {
+						Log.i("Item not found - removing preference key ", k);
+						prefs.edit().remove(k).apply();
+						return completedVoid();
+					} else {
+						VirtualResource r = i.getResource();
+						if (r == null) return completedVoid();
+						return r.exists().then(exists -> {
+							if (!exists) {
+								Log.i("Resource does not exist - removing preference key ", k);
+								prefs.edit().remove(k).apply();
+							}
+							return completedVoid();
+						});
+					}
+				});
+			}
+		}, keys);
+	}
+
+	private static void getPrefNames(Class<?> c, Set<String> names) {
+		try {
+			for (Field f : c.getDeclaredFields()) {
+				if (Pref.class.isAssignableFrom(f.getType())) {
+					Pref<?> p = (Pref<?>) f.get(null);
+					if (p != null) names.add(p.getName());
+				}
+			}
+		} catch (Exception ex) {
+			Log.e(ex, "Failed to get field names from ", c);
+		}
 	}
 
 	@SuppressWarnings("rawtypes")

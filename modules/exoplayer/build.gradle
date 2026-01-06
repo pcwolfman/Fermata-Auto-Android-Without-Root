@@ -1,21 +1,16 @@
 android {
+    namespace = "me.aap.fermata.engine.exoplayer"
     defaultConfig {
         versionCode 1
         versionName "1.0"
-
-        ndk {
-            abiFilters = ABI_FILTERS
-        }
     }
 }
 
 dependencies {
     implementation project(':utils')
     implementation project(':fermata')
-    implementation 'androidx.core:core:' + ANDROIDX_CORE_VERSION
-    implementation project(':exoplayer-library-core')
-    implementation project(':exoplayer-library-hls')
-    implementation project(':exoplayer-extension-ffmpeg')
-    implementation project(':exoplayer-extension-flac')
-    implementation project(':exoplayer-extension-opus')
+    implementation("androidx.media3:media3-exoplayer:1.2.0")
+    implementation("androidx.media3:media3-exoplayer-hls:1.2.0")
+    implementation("androidx.media3:media3-exoplayer-dash:1.2.0")
+    implementation("androidx.media3:media3-datasource-cronet:1.2.0")
 }

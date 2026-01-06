@@ -1,5 +1,8 @@
 package me.aap.fermata.vfs.sftp;
 
+import static me.aap.utils.async.Completed.completedNull;
+import static me.aap.utils.async.Completed.completedVoid;
+
 import android.content.Context;
 
 import me.aap.fermata.ui.activity.MainActivityDelegate;
@@ -11,14 +14,13 @@ import me.aap.utils.pref.BasicPreferenceStore;
 import me.aap.utils.pref.PreferenceSet;
 import me.aap.utils.pref.PreferenceStore;
 import me.aap.utils.pref.PreferenceStore.Pref;
+import me.aap.utils.text.TextUtils;
 import me.aap.utils.ui.activity.AppActivity;
 import me.aap.utils.ui.fragment.FilePickerFragment;
 import me.aap.utils.vfs.VirtualFileSystem;
 import me.aap.utils.vfs.VirtualFolder;
+import me.aap.utils.vfs.VirtualResource;
 import me.aap.utils.vfs.sftp.SftpFileSystem;
-
-import static me.aap.utils.async.Completed.completedNull;
-import static me.aap.utils.async.Completed.completedVoid;
 
 /**
  * @author Andrey Pavlenko
@@ -33,13 +35,13 @@ public class Provider extends VfsProviderBase {
 	private final Pref<Supplier<String>> KEY_PASSWD = Pref.s("KEY_PASSWD");
 
 	@Override
-	public FutureSupplier<VirtualFileSystem> createFileSystem(
+	public FutureSupplier<? extends VirtualFileSystem> createFileSystem(
 			Context ctx, Supplier<FutureSupplier<? extends AppActivity>> activitySupplier, PreferenceStore ps) {
 		return SftpFileSystem.Provider.getInstance().createFileSystem(ps);
 	}
 
 	@Override
-	protected FutureSupplier<VirtualFolder> addFolder(MainActivityDelegate a, VirtualFileSystem fs) {
+	protected FutureSupplier<? extends VirtualResource> addFolder(MainActivityDelegate a, VirtualFileSystem fs) {
 		PreferenceSet prefs = new PreferenceSet();
 		PreferenceStore ps = PrefsHolder.instance;
 
@@ -87,19 +89,20 @@ public class Provider extends VfsProviderBase {
 			o.stringHint = "secret";
 		});
 
-		return requestPrefs(a, prefs, ps).then(ok -> !ok ? completedNull() : ((SftpFileSystem) fs).addRoot(
-				ps.getStringPref(USER),
-				ps.getStringPref(HOST),
-				ps.getIntPref(PORT),
-				ps.getStringPref(PATH),
-				ps.getStringPref(PASSWD),
-				ps.getStringPref(KEY),
-				ps.getStringPref(KEY_PASSWD)));
+		return requestPrefs(a, prefs, ps).thenRun(ps::removeBroadcastListeners)
+				.then(ok -> !ok ? completedNull() : ((SftpFileSystem) fs).addRoot(
+						ps.getStringPref(USER).trim(),
+						ps.getStringPref(HOST).trim(),
+						ps.getIntPref(PORT),
+						TextUtils.trim(ps.getStringPref(PATH)),
+						TextUtils.trim(ps.getStringPref(PASSWD)),
+						TextUtils.trim(ps.getStringPref(KEY)),
+						TextUtils.trim(ps.getStringPref(KEY_PASSWD))));
 	}
 
 	@Override
-	protected FutureSupplier<Void> removeFolder(MainActivityDelegate a, VirtualFileSystem fs, VirtualFolder folder) {
-		((SftpFileSystem) fs).removeRoot(folder);
+	protected FutureSupplier<Void> removeFolder(MainActivityDelegate a, VirtualFileSystem fs, VirtualResource folder) {
+		((SftpFileSystem) fs).removeRoot((VirtualFolder) folder);
 		return completedVoid();
 	}
 

@@ -1,5 +1,8 @@
 package me.aap.fermata.vfs.smb;
 
+import static me.aap.utils.async.Completed.completedNull;
+import static me.aap.utils.async.Completed.completedVoid;
+
 import android.content.Context;
 
 import me.aap.fermata.ui.activity.MainActivityDelegate;
@@ -14,10 +17,8 @@ import me.aap.utils.pref.PreferenceStore.Pref;
 import me.aap.utils.ui.activity.AppActivity;
 import me.aap.utils.vfs.VirtualFileSystem;
 import me.aap.utils.vfs.VirtualFolder;
+import me.aap.utils.vfs.VirtualResource;
 import me.aap.utils.vfs.smb.SmbFileSystem;
-
-import static me.aap.utils.async.Completed.completedNull;
-import static me.aap.utils.async.Completed.completedVoid;
 
 /**
  * @author Andrey Pavlenko
@@ -31,13 +32,13 @@ public class Provider extends VfsProviderBase {
 	private final Pref<Supplier<String>> PASSWD = Pref.s("PASSWD");
 
 	@Override
-	public FutureSupplier<VirtualFileSystem> createFileSystem(
+	public FutureSupplier<? extends VirtualFileSystem> createFileSystem(
 			Context ctx, Supplier<FutureSupplier<? extends AppActivity>> activitySupplier, PreferenceStore ps) {
 		return SmbFileSystem.Provider.getInstance().createFileSystem(ps);
 	}
 
 	@Override
-	protected FutureSupplier<VirtualFolder> addFolder(MainActivityDelegate a, VirtualFileSystem fs) {
+	protected FutureSupplier<? extends VirtualFolder> addFolder(MainActivityDelegate a, VirtualFileSystem fs) {
 		PreferenceSet prefs = new PreferenceSet();
 		PreferenceStore ps = PrefsHolder.instance;
 
@@ -78,9 +79,8 @@ public class Provider extends VfsProviderBase {
 			o.stringHint = "secret";
 		});
 
-		return requestPrefs(a, prefs, ps).then(ok -> {
+		return requestPrefs(a, prefs, ps).thenRun(ps::removeBroadcastListeners).then(ok -> {
 			if (!ok) return completedNull();
-
 
 			String user = ps.getStringPref(USER);
 
@@ -88,7 +88,6 @@ public class Provider extends VfsProviderBase {
 				String domain = ps.getStringPref(DOMAIN);
 				if (domain != null) user = domain + ';' + user;
 			}
-
 
 			return ((SmbFileSystem) fs).addRoot(
 					user,
@@ -101,8 +100,8 @@ public class Provider extends VfsProviderBase {
 	}
 
 	@Override
-	protected FutureSupplier<Void> removeFolder(MainActivityDelegate a, VirtualFileSystem fs, VirtualFolder folder) {
-		((SmbFileSystem) fs).removeRoot(folder);
+	protected FutureSupplier<Void> removeFolder(MainActivityDelegate a, VirtualFileSystem fs, VirtualResource folder) {
+		((SmbFileSystem) fs).removeRoot((VirtualFolder) folder);
 		return completedVoid();
 	}
 

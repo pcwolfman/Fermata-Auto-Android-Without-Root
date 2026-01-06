@@ -1,5 +1,7 @@
 package me.aap.fermata.addon;
 
+import static java.util.Collections.singletonList;
+
 import android.app.Activity;
 
 import androidx.annotation.IdRes;
@@ -13,16 +15,17 @@ import java.util.Map;
 import me.aap.fermata.BuildConfig;
 import me.aap.fermata.FermataApplication;
 import me.aap.fermata.R;
+import me.aap.fermata.media.lib.DefaultMediaLib;
+import me.aap.fermata.media.lib.MediaLib.Item;
 import me.aap.fermata.ui.activity.MainActivity;
 import me.aap.utils.app.App;
+import me.aap.utils.async.FutureSupplier;
 import me.aap.utils.event.BasicEventBroadcaster;
 import me.aap.utils.log.Log;
 import me.aap.utils.module.DynamicModuleInstaller;
 import me.aap.utils.pref.PreferenceStore;
 import me.aap.utils.ui.activity.ActivityBase;
 import me.aap.utils.ui.fragment.ActivityFragment;
-
-import static java.util.Collections.singletonList;
 
 /**
  * @author Andrey Pavlenko
@@ -51,8 +54,15 @@ public class AddonManager extends BasicEventBroadcaster<AddonManager.Listener>
 	}
 
 	@Nullable
-	public FermataAddon getAddon(String className) {
-		return addons.get(className);
+	public FermataAddon getAddon(String moduleOrClassName) {
+		if (moduleOrClassName.indexOf('.') < 0) {
+			for (FermataAddon a : addons.values()) {
+				if (a.getInfo().getModuleName().equals(moduleOrClassName)) return a;
+			}
+		} else {
+			return addons.get(moduleOrClassName);
+		}
+		return null;
 	}
 
 	@SuppressWarnings("unchecked")
@@ -65,12 +75,44 @@ public class AddonManager extends BasicEventBroadcaster<AddonManager.Listener>
 		return addons.values();
 	}
 
+	public boolean hasAddon(@IdRes int id) {
+		for (FermataAddon a : getAddons()) {
+			if (a.getAddonId() == id) return true;
+		}
+		return false;
+	}
+
 	@Nullable
 	public ActivityFragment createFragment(@IdRes int id) {
 		for (FermataAddon a : getAddons()) {
-			ActivityFragment f = a.createFragment(id);
-			if (f != null) return f;
+			if (a instanceof FermataFragmentAddon) {
+				if (a.getAddonId() == id) return ((FermataFragmentAddon) a).createFragment();
+			}
 		}
+		return null;
+	}
+
+	@Nullable
+	public FutureSupplier<? extends Item> getItem(DefaultMediaLib lib, @Nullable String scheme, String id) {
+		for (FermataAddon a : getAddons()) {
+			if (a instanceof MediaLibAddon) {
+				FutureSupplier<? extends Item> i = ((MediaLibAddon) a).getItem(lib, scheme, id);
+				if (i != null) return i;
+			}
+		}
+
+		return null;
+	}
+
+	@Nullable
+	public MediaLibAddon getMediaLibAddon(Item i) {
+		for (FermataAddon a : getAddons()) {
+			if (a instanceof MediaLibAddon) {
+				MediaLibAddon mla = (MediaLibAddon) a;
+				if (mla.isSupportedItem(i)) return mla;
+			}
+		}
+
 		return null;
 	}
 
@@ -92,8 +134,9 @@ public class AddonManager extends BasicEventBroadcaster<AddonManager.Listener>
 			try {
 				FermataAddon a = (FermataAddon) Class.forName(i.className).newInstance();
 				PreferenceStore prefs = FermataApplication.get().getPreferenceStore();
+				a.install();
 				addons.put(i.className, a);
-				fireBroadcastEvent(c -> c.addonChanged(this, i, true));
+				fireBroadcastEvent(c -> c.onAddonChanged(this, i, true));
 				prefs.fireBroadcastEvent(l -> l.onPreferenceChanged(prefs, singletonList(i.enabledPref)));
 				return;
 			} catch (Exception ignore) {
@@ -116,9 +159,12 @@ public class AddonManager extends BasicEventBroadcaster<AddonManager.Listener>
 	}
 
 	private void uninstall(AddonInfo i) {
-		if (addons.remove(i.className) != null) {
+		FermataAddon removed = addons.remove(i.className);
+
+		if (removed != null) {
+			removed.uninstall();
 			PreferenceStore prefs = FermataApplication.get().getPreferenceStore();
-			fireBroadcastEvent(c -> c.addonChanged(this, i, false));
+			fireBroadcastEvent(c -> c.onAddonChanged(this, i, false));
 			prefs.fireBroadcastEvent(l -> l.onPreferenceChanged(prefs, singletonList(i.enabledPref)));
 
 			for (AddonInfo ai : BuildConfig.ADDONS) {
@@ -136,7 +182,7 @@ public class AddonManager extends BasicEventBroadcaster<AddonManager.Listener>
 	private static DynamicModuleInstaller createInstaller(Activity a, AddonInfo ai) {
 		DynamicModuleInstaller i = new DynamicModuleInstaller(a);
 		String name = a.getString(ai.addonName);
-		i.setSmallIcon(R.drawable.ic_notification);
+		i.setSmallIcon(R.drawable.notification);
 		i.setTitle(a.getString(R.string.module_installation, name));
 		i.setNotificationChannel(CHANNEL_ID, a.getString(R.string.installing, name));
 		i.setPendingMessage(a.getString(R.string.install_pending, name));
@@ -146,6 +192,6 @@ public class AddonManager extends BasicEventBroadcaster<AddonManager.Listener>
 	}
 
 	public interface Listener {
-		void addonChanged(AddonManager mgr, AddonInfo info, boolean installed);
+		void onAddonChanged(AddonManager mgr, AddonInfo info, boolean installed);
 	}
 }

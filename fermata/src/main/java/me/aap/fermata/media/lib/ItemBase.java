@@ -1,7 +1,14 @@
 package me.aap.fermata.media.lib;
 
+import static java.util.Objects.requireNonNull;
+import static me.aap.utils.async.Completed.completed;
+import static me.aap.utils.async.Completed.completedNull;
+import static me.aap.utils.async.Completed.completedVoid;
+import static me.aap.utils.misc.Assert.assertNotEquals;
+
 import android.content.SharedPreferences;
 import android.net.Uri;
+import android.os.Bundle;
 import android.support.v4.media.MediaDescriptionCompat;
 
 import androidx.annotation.Keep;
@@ -16,25 +23,25 @@ import me.aap.fermata.media.lib.MediaLib.BrowsableItem;
 import me.aap.fermata.media.lib.MediaLib.Item;
 import me.aap.fermata.media.pref.BrowsableItemPrefs;
 import me.aap.fermata.media.pref.MediaPrefs;
+import me.aap.utils.async.Async;
 import me.aap.utils.async.FutureSupplier;
 import me.aap.utils.async.Promise;
 import me.aap.utils.event.EventBroadcaster;
+import me.aap.utils.log.Log;
 import me.aap.utils.pref.PreferenceStore;
 import me.aap.utils.pref.SharedPreferenceStore;
 import me.aap.utils.vfs.VirtualResource;
-
-import static java.util.Objects.requireNonNull;
-import static me.aap.utils.async.Completed.completed;
-import static me.aap.utils.async.Completed.completedVoid;
-import static me.aap.utils.misc.Assert.assertNotEquals;
 
 /**
  * @author Andrey Pavlenko
  */
 public abstract class ItemBase implements Item, MediaPrefs, SharedPreferenceStore {
 	@SuppressWarnings({"unchecked", "rawtypes"})
-	private static final AtomicReferenceFieldUpdater<ItemBase, FutureSupplier<MediaDescriptionCompat>> MD =
-			(AtomicReferenceFieldUpdater) AtomicReferenceFieldUpdater.newUpdater(ItemBase.class, FutureSupplier.class, "description");
+	private static final AtomicReferenceFieldUpdater<ItemBase,
+			FutureSupplier<MediaDescriptionCompat>>
+			MD =
+			(AtomicReferenceFieldUpdater) AtomicReferenceFieldUpdater.newUpdater(ItemBase.class,
+					FutureSupplier.class, "description");
 	@Keep
 	@SuppressWarnings({"unused", "FieldCanBeLocal"})
 	private volatile FutureSupplier<MediaDescriptionCompat> description;
@@ -47,16 +54,19 @@ public abstract class ItemBase implements Item, MediaPrefs, SharedPreferenceStor
 		this.id = id.intern();
 		this.parent = parent;
 		this.file = resource;
-		MediaLib lib = getLib();
 
-		if (!isExternal() && (lib instanceof DefaultMediaLib)) {
-			((DefaultMediaLib) lib).addToCache(this);
+		if (!isExternal() && (getLib() instanceof DefaultMediaLib)) {
+			((DefaultMediaLib) getLib()).addToCache(this);
 		}
 	}
 
 	protected abstract FutureSupplier<String> buildTitle(int seqNum, BrowsableItemPrefs parentPrefs);
 
 	protected abstract FutureSupplier<String> buildSubtitle();
+
+	protected FutureSupplier<Bundle> buildExtras() {
+		return completedNull();
+	}
 
 	@NonNull
 	@Override
@@ -68,51 +78,59 @@ public abstract class ItemBase implements Item, MediaPrefs, SharedPreferenceStor
 	@Override
 	public FutureSupplier<MediaDescriptionCompat> getMediaDescription() {
 		FutureSupplier<MediaDescriptionCompat> d = MD.get(this);
-		if (d != null) return d;
+		if (isMediaDescriptionValid(d)) return d;
 
 		Promise<MediaDescriptionCompat> load = new Promise<>();
 
-		for (; !MD.compareAndSet(this, null, load); d = MD.get(this)) {
-			if (d != null) return d;
+		for (; !MD.compareAndSet(this, d, load); d = MD.get(this)) {
+			if (d != null) return d.fork();
 		}
-
-		MediaDescriptionCompat.Builder b = new MediaDescriptionCompat.Builder();
-		b.setMediaId(getId());
 
 		FutureSupplier<String> title = buildTitle();
 		FutureSupplier<String> subtitle = buildSubtitle();
+		FutureSupplier<Bundle> extras = buildExtras();
 		FutureSupplier<Uri> icon = getIconUri();
 
-		if (title.isDone() && subtitle.isDone() && icon.isDone()) {
-			b.setTitle(title.get(() -> getResource().getName()));
+		if (title.isDone() && subtitle.isDone() && icon.isDone() && extras.isDone()) {
+			MediaDescriptionCompat.Builder b = builder();
+			b.setTitle(title.get(this::getName));
 			b.setSubtitle(subtitle.get(() -> ""));
 			b.setIconUri(icon.get(null));
+			b.setExtras(extras.get(null));
 			MediaDescriptionCompat dsc = b.build();
 			load.complete(dsc);
 			d = completed(dsc);
 			return MD.compareAndSet(this, load, d) ? d : getMediaDescription();
 		}
 
-		title.onProgress((t, progress, total) -> {
-			MediaDescriptionCompat.Builder build = new MediaDescriptionCompat.Builder();
-			build.setMediaId(getId());
-			build.setTitle(t);
-			load.setProgress(build.build(), 1, 3);
-		}).then(t -> {
-			b.setTitle(t);
-			load.setProgress(b.build(), 1, 3);
-			return subtitle.then(s -> {
-				b.setSubtitle(s);
-				load.setProgress(b.build(), 2, 3);
-				return icon.then(u -> {
-					if (u != null) b.setIconUri(u);
-					return completed(b.build());
-				});
-			});
-		}).thenReplaceOrClear(MD, this, load);
+		title.onSuccess(t -> load.setProgress(builder().setTitle(t).build(), 1, 4));
+		subtitle.onSuccess(s -> load.setProgress(builder().setSubtitle(s).build(), 2, 4));
+		extras.onSuccess(e -> load.setProgress(builder().setExtras(e).build(), 3, 4));
+		icon.onSuccess(i -> load.setProgress(builder().setIconUri(i).build(), 4, 4));
+		Async.all(title, subtitle, extras, icon).onCompletion((e, err) -> {
+			if (err != null) Log.d(err, "Failed to build MediaDescription: ", this);
+			MediaDescriptionCompat.Builder b = builder();
+			b.setTitle(title.peek(this::getName));
+			b.setSubtitle(subtitle.peek(() -> ""));
+			b.setIconUri(icon.peek(() -> null));
+			b.setExtras(extras.peek(() -> null));
+			MediaDescriptionCompat md = b.build();
+			MD.compareAndSet(this, load, completed(md));
+			load.complete(md);
+		});
 
 		d = MD.get(this);
-		return (d != null) ? d : load;
+		return ((d != null) ? d : load).fork();
+	}
+
+	private MediaDescriptionCompat.Builder builder() {
+		MediaDescriptionCompat.Builder b = new MediaDescriptionCompat.Builder();
+		b.setMediaId(getId());
+		return b;
+	}
+
+	protected boolean isMediaDescriptionValid(FutureSupplier<MediaDescriptionCompat> d) {
+		return d != null;
 	}
 
 	protected FutureSupplier<String> buildTitle() {
@@ -126,7 +144,7 @@ public abstract class ItemBase implements Item, MediaPrefs, SharedPreferenceStor
 				return buildTitle(seqNum, prefs);
 			} else {
 				Promise<String> load = new Promise<>();
-				parent.getChildren().then(children -> {
+				getChildren.then(children -> {
 					assertNotEquals(seqNum, 0);
 					return buildTitle(seqNum, prefs);
 				}).thenComplete(load);
@@ -221,7 +239,11 @@ public abstract class ItemBase implements Item, MediaPrefs, SharedPreferenceStor
 		return getId();
 	}
 
-	void setSeqNum(int seqNum) {
+	public int getSeqNum() {
+		return seqNum;
+	}
+
+	public void setSeqNum(int seqNum) {
 		this.seqNum = seqNum;
 	}
 
@@ -234,7 +256,13 @@ public abstract class ItemBase implements Item, MediaPrefs, SharedPreferenceStor
 		throw new UnsupportedOperationException("Not implemented");
 	}
 
-	void reset() {
+	protected void reset() {
 		description = null;
+	}
+
+	protected void set(ItemBase i) {
+		FutureSupplier<MediaDescriptionCompat> d = i.description;
+		if ((d != null) && d.isDone() && !d.isFailed()) description = d;
+		seqNum = i.seqNum;
 	}
 }

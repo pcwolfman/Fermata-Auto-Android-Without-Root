@@ -1,14 +1,15 @@
 package me.aap.fermata.addon;
 
-import androidx.annotation.IdRes;
-import androidx.annotation.Nullable;
+import android.content.Intent;
 
+import androidx.annotation.IdRes;
+import androidx.annotation.NonNull;
+
+import me.aap.fermata.BuildConfig;
+import me.aap.fermata.ui.activity.MainActivityDelegate;
 import me.aap.utils.misc.ChangeableCondition;
 import me.aap.utils.pref.PreferenceSet;
 import me.aap.utils.pref.PreferenceStore;
-import me.aap.utils.ui.fragment.ActivityFragment;
-
-import static me.aap.utils.ui.UiUtils.ID_NULL;
 
 /**
  * @author Andrey Pavlenko
@@ -16,15 +17,29 @@ import static me.aap.utils.ui.UiUtils.ID_NULL;
 public interface FermataAddon {
 
 	@IdRes
-	default int getNavId() {
-		return ID_NULL;
-	}
+	int getAddonId();
 
-	@Nullable
-	default ActivityFragment createFragment(@IdRes int id) {
-		return null;
-	}
+	@NonNull
+	AddonInfo getInfo();
 
 	default void contributeSettings(PreferenceStore store, PreferenceSet set, ChangeableCondition visibility) {
+	}
+
+	default void install() {
+	}
+
+	default void uninstall() {
+	}
+
+	default boolean handleIntent(MainActivityDelegate a, Intent intent) {
+		return false;
+	}
+
+	@NonNull
+	static AddonInfo findAddonInfo(String name) {
+		for (AddonInfo ai : BuildConfig.ADDONS) {
+			if (ai.className.equals(name)) return ai;
+		}
+		throw new RuntimeException("Addon not found: " + name);
 	}
 }

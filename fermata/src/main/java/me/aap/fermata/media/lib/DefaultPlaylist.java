@@ -1,14 +1,18 @@
 package me.aap.fermata.media.lib;
 
+import static java.util.Objects.requireNonNull;
+import static me.aap.utils.async.Completed.completed;
+import static me.aap.utils.collection.CollectionUtils.mapToArray;
+
 import android.content.Context;
 import android.content.SharedPreferences;
 
 import androidx.annotation.NonNull;
 
 import java.util.Collection;
-import java.util.Collections;
 import java.util.List;
 
+import me.aap.fermata.BuildConfig;
 import me.aap.fermata.R;
 import me.aap.fermata.media.lib.MediaLib.BrowsableItem;
 import me.aap.fermata.media.lib.MediaLib.Item;
@@ -22,10 +26,6 @@ import me.aap.utils.pref.PreferenceStore;
 import me.aap.utils.pref.SharedPreferenceStore;
 import me.aap.utils.text.SharedTextBuilder;
 
-import static java.util.Objects.requireNonNull;
-import static me.aap.utils.async.Completed.completed;
-import static me.aap.utils.collection.CollectionUtils.mapToArray;
-
 /**
  * @author Andrey Pavlenko
  */
@@ -33,12 +33,27 @@ class DefaultPlaylist extends ItemContainer<PlayableItem> implements Playlist, P
 	private final int playlistId;
 	private final SharedPreferenceStore playlistPrefStore;
 
-	public DefaultPlaylist(String id, BrowsableItem parent, int playlistId) {
+	private DefaultPlaylist(String id, BrowsableItem parent, int playlistId) {
 		super(id, parent, null);
 		this.playlistId = playlistId;
 		SharedPreferences prefs = getLib().getContext().getSharedPreferences("playlist_" + playlistId,
 				Context.MODE_PRIVATE);
 		playlistPrefStore = SharedPreferenceStore.create(prefs, getLib().getPrefs());
+	}
+
+	public static DefaultPlaylist create(String id, BrowsableItem parent, int playlistId, DefaultMediaLib lib) {
+		synchronized (lib.cacheLock()) {
+			Item i = lib.getFromCache(id);
+
+			if (i != null) {
+				DefaultPlaylist pl = (DefaultPlaylist) i;
+				if (BuildConfig.D && !parent.equals(pl.getParent())) throw new AssertionError();
+				if (BuildConfig.D && !id.equals(pl.getId())) throw new AssertionError();
+				return pl;
+			} else {
+				return new DefaultPlaylist(id, parent, playlistId);
+			}
+		}
 	}
 
 	@Override
@@ -48,10 +63,11 @@ class DefaultPlaylist extends ItemContainer<PlayableItem> implements Playlist, P
 
 	@Override
 	protected FutureSupplier<String> buildSubtitle() {
-		int count = getUnsortedChildren().peek(Collections::emptyList).size();
-		return completed(getLib().getContext().getResources().getString(R.string.browsable_subtitle, count));
+		return getUnsortedChildren().main().map(l ->
+				getLib().getContext().getResources().getString(R.string.browsable_subtitle, l.size()));
 	}
 
+	@NonNull
 	@Override
 	public String getName() {
 		return getPlaylistNamePref();
@@ -85,11 +101,11 @@ class DefaultPlaylist extends ItemContainer<PlayableItem> implements Playlist, P
 	}
 
 	public FutureSupplier<List<Item>> listChildren() {
-		return listChildren(getPlaylistItemsPref());
+		return listChildren(getPlaylistPreferenceStore(), PLAYLIST_ITEMS);
 	}
 
 	@Override
-	String getScheme() {
+	protected String getScheme() {
 		return getId();
 	}
 
@@ -101,7 +117,18 @@ class DefaultPlaylist extends ItemContainer<PlayableItem> implements Playlist, P
 	}
 
 	@Override
-	void saveChildren(List<PlayableItem> children) {
+	protected void saveChildren(List<PlayableItem> children) {
 		setPlaylistItemsPref(mapToArray(children, PlayableItem::getOrigId, String[]::new));
+	}
+
+	@Override
+	protected void itemAdded(PlayableItem i) {
+		getLib().getAtvInterface(a -> a.addProgram(i));
+	}
+
+	@Override
+	protected void itemRemoved(PlayableItem i) {
+		super.itemRemoved(i);
+		getLib().getAtvInterface(a -> a.removeProgram(i));
 	}
 }

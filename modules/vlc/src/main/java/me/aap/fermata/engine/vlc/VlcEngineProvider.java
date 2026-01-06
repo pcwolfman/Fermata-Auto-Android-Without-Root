@@ -1,16 +1,23 @@
 package me.aap.fermata.engine.vlc;
 
+import static org.videolan.libvlc.interfaces.IMedia.Parse.DoInteract;
+import static org.videolan.libvlc.interfaces.IMedia.Parse.FetchLocal;
+import static org.videolan.libvlc.interfaces.IMedia.Parse.FetchNetwork;
+import static org.videolan.libvlc.interfaces.IMedia.Parse.ParseLocal;
+import static org.videolan.libvlc.interfaces.IMedia.Parse.ParseNetwork;
+import static java.nio.charset.StandardCharsets.UTF_8;
+
 import android.content.ContentResolver;
 import android.content.Context;
-import android.graphics.Bitmap;
 import android.media.AudioManager;
-import android.media.MediaMetadataRetriever;
 import android.net.Uri;
 import android.os.ParcelFileDescriptor;
 import android.support.v4.media.MediaMetadataCompat;
 
-import org.videolan.libvlc.LibVLC;
+import org.videolan.libvlc.FactoryManager;
 import org.videolan.libvlc.Media;
+import org.videolan.libvlc.interfaces.ILibVLC;
+import org.videolan.libvlc.interfaces.ILibVLCFactory;
 import org.videolan.libvlc.interfaces.IMedia;
 
 import java.io.File;
@@ -27,19 +34,11 @@ import me.aap.utils.io.IoUtils;
 import me.aap.utils.log.Log;
 import me.aap.utils.security.SecurityUtils;
 
-import static java.nio.charset.StandardCharsets.UTF_8;
-import static java.util.concurrent.TimeUnit.MICROSECONDS;
-import static java.util.concurrent.TimeUnit.MILLISECONDS;
-import static org.videolan.libvlc.interfaces.IMedia.Parse.FetchLocal;
-import static org.videolan.libvlc.interfaces.IMedia.Parse.FetchNetwork;
-import static org.videolan.libvlc.interfaces.IMedia.Parse.ParseLocal;
-import static org.videolan.libvlc.interfaces.IMedia.Parse.ParseNetwork;
-
 /**
  * @author Andrey Pavlenko
  */
 public class VlcEngineProvider implements MediaEngineProvider {
-	private LibVLC vlc;
+	private ILibVLC vlc;
 	private int audioSessionId;
 	private String artUri;
 
@@ -49,34 +48,37 @@ public class VlcEngineProvider implements MediaEngineProvider {
 		AudioManager am = (AudioManager) ctx.getSystemService(Context.AUDIO_SERVICE);
 		audioSessionId = (am != null) ? am.generateAudioSessionId() : AudioManager.ERROR;
 
-		if (BuildConfig.DEBUG) opts.add("-vvv");
-		if (audioSessionId != AudioManager.ERROR)
-			opts.add("--audiotrack-session-id=" + audioSessionId);
-
-		opts.add("--avcodec-skiploopfilter");
-		opts.add("1");
-		opts.add("--avcodec-skip-frame");
-		opts.add("0");
+		if (BuildConfig.D) opts.add("-vvv");
+		if (audioSessionId != AudioManager.ERROR) opts.add("--audiotrack-session-id=" + audioSessionId);
 		opts.add("--avcodec-skip-idct");
 		opts.add("0");
-		opts.add("--no-stats");
+		opts.add("--avcodec-skip-frame");
+		opts.add("0");
+		opts.add("--avcodec-skiploopfilter");
+		opts.add("1");
 		opts.add("--android-display-chroma");
-		opts.add("RV16");
+		opts.add("RV24");
 		opts.add("--sout-keep");
 		opts.add("--audio-time-stretch");
 		opts.add("--audio-resampler");
 		opts.add("soxr");
 		opts.add("--subsdec-encoding=UTF8");
-		opts.add("--freetype-rel-fontsize=16");
 		opts.add("--freetype-color=16777215");
+		opts.add("--freetype-opacity=255");
 		opts.add("--freetype-background-opacity=0");
-		opts.add("--no-sout-chromecast-audio-passthrough");
-		opts.add("--sout-chromecast-conversion-quality=2");
-//		opts.add("--aout=opensles,android_audiotrack");
-//		opts.add("--vout=android_display");
-//		opts.add("--vout=opengles2");
+		opts.add("--freetype-shadow-color=0");
+		opts.add("--freetype-shadow-opacity=128");
+		opts.add("--freetype-outline-thickness=4");
+		opts.add("--freetype-outline-color=0");
+		opts.add("--freetype-outline-opacity=255");
+		opts.add("--freetype-outline-opacity=255");
+		opts.add("--freetype-rel-fontsize=16");
+		opts.add("--network-caching=60000");
+		opts.add("--no-lua");
+		opts.add("--no-stats");
 
-		vlc = new LibVLC(ctx, opts);
+		ILibVLCFactory f = (ILibVLCFactory) FactoryManager.getFactory(ILibVLCFactory.factoryId);
+		vlc = f.getFromOptions(ctx, opts);
 	}
 
 	@Override
@@ -88,7 +90,6 @@ public class VlcEngineProvider implements MediaEngineProvider {
 	public boolean getMediaMetadata(MetadataBuilder meta, PlayableItem item) {
 		Media media = null;
 		ParcelFileDescriptor fd = null;
-		MediaMetadataRetriever mmr = null;
 
 		try {
 			Uri uri = item.getLocation();
@@ -96,12 +97,13 @@ public class VlcEngineProvider implements MediaEngineProvider {
 			if ("content".equals(uri.getScheme())) {
 				ContentResolver cr = getVlc().getAppContext().getContentResolver();
 				fd = cr.openFileDescriptor(uri, "r");
-				media = (fd != null) ? new Media(getVlc(), fd.getFileDescriptor()) : new Media(getVlc(), uri);
+				media =
+						(fd != null) ? new Media(getVlc(), fd.getFileDescriptor()) : new Media(getVlc(), uri);
 			} else {
 				media = new Media(getVlc(), uri);
 			}
 
-			media.parse(ParseLocal | ParseNetwork | FetchLocal | FetchNetwork);
+			media.parse(ParseLocal | ParseNetwork | FetchLocal | FetchNetwork | DoInteract);
 
 			String title = media.getMeta(IMedia.Meta.Title);
 			String artist = media.getMeta(IMedia.Meta.Artist);
@@ -130,12 +132,10 @@ public class VlcEngineProvider implements MediaEngineProvider {
 			meta.putLong(MediaMetadataCompat.METADATA_KEY_DURATION, dur);
 
 			m = media.getMeta(IMedia.Meta.ArtworkURL);
-			boolean iconSet = false;
 
 			if (m != null) {
 				if (m.startsWith("file://")) {
-					meta.putString(MediaMetadataCompat.METADATA_KEY_ALBUM_ART_URI, m);
-					iconSet = true;
+					meta.setImageUri(m);
 				} else if (m.startsWith("attachment://")) {
 					if (((artist != null) && !artist.isEmpty() && !"Unknown Artist".equals(artist)) &&
 							((album != null) && !album.isEmpty() && !"Unknown Album".equals(artist))) {
@@ -146,18 +146,9 @@ public class VlcEngineProvider implements MediaEngineProvider {
 					}
 
 					if (new File(new URI(m)).isFile()) {
-						meta.putString(MediaMetadataCompat.METADATA_KEY_ALBUM_ART_URI, m);
-						iconSet = true;
+						meta.setImageUri(m);
 					}
 				}
-			}
-
-			if (!iconSet && item.isVideo() && item.getResource().isLocalFile()) {
-				mmr = new MediaMetadataRetriever();
-				mmr.setDataSource(vlc.getAppContext(), item.getLocation());
-				dur = MICROSECONDS.convert(dur, MILLISECONDS);
-				Bitmap bm = mmr.getFrameAtTime(dur / 2);
-				if (isValidBitmap(bm)) meta.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, bm);
 			}
 
 			return true;
@@ -166,12 +157,11 @@ public class VlcEngineProvider implements MediaEngineProvider {
 			return false;
 		} finally {
 			if (media != null) media.release();
-			if (mmr != null) mmr.release();
 			IoUtils.close(fd);
 		}
 	}
 
-	public LibVLC getVlc() {
+	public ILibVLC getVlc() {
 		return vlc;
 	}
 
