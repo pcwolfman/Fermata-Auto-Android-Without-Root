@@ -19,6 +19,8 @@
     <item name="tool_sort_random" type="id" />
     <item name="tool_sort_desc" type="id" />
     <item name="tool_sort_none" type="id" />
+    <item name="tool_pg_up" type="id" />
+    <item name="tool_pg_down" type="id" />
 
     <item name="menu" type="id" />
 
@@ -27,8 +29,10 @@
     <item name="playlists_fragment" type="id" />
     <item name="settings_fragment" type="id" />
     <item name="audio_effects_fragment" type="id" />
+    <item name="tv_fragment" type="id" />
     <item name="youtube_fragment" type="id" />
     <item name="web_browser_fragment" type="id" />
+    <item name="felex_fragment" type="id" />
 
     <item name="nav_got_to_current" type="id" />
     <item name="nav_donate" type="id" />
@@ -43,6 +47,10 @@
 
     <item name="refresh" type="id" />
     <item name="rescan" type="id" />
+    <item name="edit" type="id" />
+    <item name="delete" type="id" />
+
+    <item name="programme_guide" type="id" />
 
     <item name="favorites_add" type="id" />
     <item name="favorites_remove" type="id" />
@@ -91,6 +99,7 @@
     <item name="repeat_folder" type="id" />
 
     <item name="playback_settings" type="id" />
+    <item name="watched_threshold" type="id" />
     <item name="play_next" type="id" />
 
     <item name="bookmarks" type="id" />
@@ -111,7 +120,9 @@
     <item name="vfs_gdrive" type="id" />
     <item name="vfs_sftp" type="id" />
     <item name="vfs_smb" type="id" />
+    <item name="m3u_playlist" type="id" />
 
     <item name="car_edit_text" type="id" />
+    <item name="share" type="id" />
 
 </resources>

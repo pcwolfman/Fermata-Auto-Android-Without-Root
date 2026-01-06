@@ -33,8 +33,12 @@ public interface MediaEngine extends Closeable {
 	void pause();
 
 	default boolean canPause() {
+		return canSeek();
+	}
+
+	default boolean canSeek() {
 		PlayableItem src = getSource();
-		return (src != null) && !src.isStream();
+		return (src != null) && src.isSeekable();
 	}
 
 	PlayableItem getSource();
@@ -49,14 +53,19 @@ public interface MediaEngine extends Closeable {
 
 	void setSpeed(float speed);
 
-	void setVideoView(VideoView view);
-
-	float getVideoWidth();
-
-	float getVideoHeight();
-
 	@Override
 	void close();
+
+	default void setVideoView(VideoView view) {
+	}
+
+	default float getVideoWidth() {
+		return 0;
+	}
+
+	default float getVideoHeight() {
+		return 0;
+	}
 
 	@Nullable
 	default AudioEffects getAudioEffects() {
@@ -112,12 +121,12 @@ public interface MediaEngine extends Closeable {
 	}
 
 	default boolean requestAudioFocus(@Nullable AudioManager audioManager, @Nullable AudioFocusRequestCompat audioFocusReq) {
-		return (audioManager == null) ||
+		return (audioManager == null) || (audioFocusReq == null) ||
 				(AudioManagerCompat.requestAudioFocus(audioManager, audioFocusReq) == AUDIOFOCUS_REQUEST_GRANTED);
 	}
 
 	default void releaseAudioFocus(@Nullable AudioManager audioManager, @Nullable AudioFocusRequestCompat audioFocusReq) {
-		if (audioManager != null)
+		if ((audioManager != null) && (audioFocusReq != null))
 			AudioManagerCompat.abandonAudioFocusRequest(audioManager, audioFocusReq);
 	}
 

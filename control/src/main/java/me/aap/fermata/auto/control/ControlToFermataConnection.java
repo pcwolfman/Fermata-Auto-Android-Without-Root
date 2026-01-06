@@ -1,9 +1,15 @@
 package me.aap.fermata.auto.control;
 
+import static android.app.PendingIntent.FLAG_IMMUTABLE;
+import static android.support.v4.media.session.PlaybackStateCompat.REPEAT_MODE_INVALID;
+import static android.support.v4.media.session.PlaybackStateCompat.SHUFFLE_MODE_INVALID;
+import static java.util.Objects.requireNonNull;
+
 import android.app.PendingIntent;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ResolveInfo;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.os.Message;
@@ -25,10 +31,6 @@ import me.aap.fermata.media.service.ControlServiceConnection;
 import me.aap.fermata.media.service.MediaSessionState;
 import me.aap.fermata.media.service.SharedConstants;
 
-import static android.support.v4.media.session.PlaybackStateCompat.REPEAT_MODE_INVALID;
-import static android.support.v4.media.session.PlaybackStateCompat.SHUFFLE_MODE_INVALID;
-import static java.util.Objects.requireNonNull;
-
 /**
  * @author Andrey Pavlenko
  */
@@ -44,7 +46,7 @@ class ControlToFermataConnection extends ControlServiceConnection implements Sha
 		service.setSessionToken(session.getSessionToken());
 		session.setCallback(new ControlCallback());
 		Intent i = new Intent(Intent.ACTION_MEDIA_BUTTON, null, service, MediaButtonReceiver.class);
-		session.setMediaButtonReceiver(PendingIntent.getBroadcast(service, 0, i, 0));
+		session.setMediaButtonReceiver(PendingIntent.getBroadcast(service, 0, i, FLAG_IMMUTABLE));
 	}
 
 	@Override
@@ -158,8 +160,22 @@ class ControlToFermataConnection extends ControlServiceConnection implements Sha
 	}
 
 	public void connect() {
-		Intent i = new Intent(ACTION_CONTROL_SERVICE);
-		String pkg = BuildConfig.DEBUG ? "me.aap.fermata.auto.debug" : "me.aap.fermata.auto";
+		Intent i = new Intent("me.aap.fermata.action.CarMediaService");
+		String pkg = null;
+
+		for (ResolveInfo ri : service.getPackageManager().queryIntentServices(i, 0)) {
+			if ((ri.serviceInfo == null) || "me.aap.fermata".equals(ri.serviceInfo.packageName)) continue;
+			pkg = ri.serviceInfo.packageName;
+			Log.i("Fermata Auto application found: ", pkg);
+			break;
+		}
+
+		if (pkg == null) {
+			pkg = service.getPackageName().replace(".control", "");
+			Log.w(getClass().getName(), "Fermata Auto application not found!");
+		}
+
+		i = new Intent(ACTION_CONTROL_SERVICE);
 		i.setComponent(new ComponentName(pkg, "me.aap.fermata.media.service.FermataMediaService"));
 		service.bindService(i, this, Context.BIND_AUTO_CREATE);
 	}
@@ -255,6 +271,11 @@ class ControlToFermataConnection extends ControlServiceConnection implements Sha
 		@Override
 		public void onPlayFromMediaId(String mediaId, Bundle extras) {
 			send(MSG_PLAY, mediaId, 0);
+		}
+
+		@Override
+		public void onPlayFromSearch(String query, Bundle extras) {
+			send(MSG_PLAY_FROM_SEARCH, query, 0);
 		}
 
 		@Override

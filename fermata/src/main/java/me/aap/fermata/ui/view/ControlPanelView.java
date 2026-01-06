@@ -1,9 +1,18 @@
 package me.aap.fermata.ui.view;
 
+import static android.media.AudioManager.ADJUST_LOWER;
+import static android.media.AudioManager.ADJUST_RAISE;
+import static android.media.AudioManager.FLAG_SHOW_UI;
+import static android.media.AudioManager.STREAM_MUSIC;
+import static android.util.TypedValue.COMPLEX_UNIT_PX;
+import static androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID;
+import static me.aap.utils.ui.UiUtils.getTextAppearanceSize;
+import static me.aap.utils.ui.UiUtils.isVisible;
+import static me.aap.utils.ui.UiUtils.toIntPx;
+
 import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.res.TypedArray;
-import android.graphics.Color;
 import android.media.AudioManager;
 import android.os.Bundle;
 import android.os.Parcelable;
@@ -11,10 +20,13 @@ import android.util.AttributeSet;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.ImageView;
 import android.widget.TextView;
 
+import androidx.annotation.DimenRes;
+import androidx.annotation.IdRes;
 import androidx.annotation.Nullable;
-import androidx.appcompat.widget.LinearLayoutCompat;
+import androidx.annotation.StyleRes;
 import androidx.constraintlayout.widget.ConstraintLayout;
 import androidx.core.view.GestureDetectorCompat;
 
@@ -22,7 +34,6 @@ import com.google.android.material.textview.MaterialTextView;
 
 import java.util.List;
 
-import me.aap.fermata.FermataApplication;
 import me.aap.fermata.R;
 import me.aap.fermata.media.engine.AudioStreamInfo;
 import me.aap.fermata.media.engine.MediaEngine;
@@ -38,7 +49,6 @@ import me.aap.fermata.media.service.MediaSessionCallback;
 import me.aap.fermata.ui.activity.MainActivityDelegate;
 import me.aap.fermata.ui.activity.MainActivityListener;
 import me.aap.fermata.ui.activity.MainActivityPrefs;
-import me.aap.utils.app.App;
 import me.aap.utils.function.BooleanSupplier;
 import me.aap.utils.function.DoubleSupplier;
 import me.aap.utils.function.IntSupplier;
@@ -52,24 +62,21 @@ import me.aap.utils.ui.UiUtils;
 import me.aap.utils.ui.menu.OverlayMenu;
 import me.aap.utils.ui.menu.OverlayMenuItem;
 import me.aap.utils.ui.view.GestureListener;
-import me.aap.utils.ui.view.ImageButton;
-
-import static android.media.AudioManager.ADJUST_LOWER;
-import static android.media.AudioManager.ADJUST_RAISE;
-import static android.media.AudioManager.FLAG_SHOW_UI;
-import static android.media.AudioManager.STREAM_MUSIC;
-import static androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID;
+import me.aap.utils.ui.view.NavBarView;
 
 /**
  * @author Andrey Pavlenko
  */
-public class ControlPanelView extends LinearLayoutCompat implements MainActivityListener,
+public class ControlPanelView extends ConstraintLayout implements MainActivityListener,
 		PreferenceStore.Listener, OverlayMenu.SelectionHandler, GestureListener {
 	private static final byte MASK_VISIBLE = 1;
 	private static final byte MASK_VIDEO_MODE = 2;
 	private final GestureDetectorCompat gestureDetector;
-	private final ImageButton showHideBars;
-	private final int timerTextAppearance;
+	private final ImageView showHideBars;
+	@DimenRes
+	private final int size;
+	@StyleRes
+	private final int textAppearance;
 	private PlaybackControlPrefs prefs;
 	private HideTimer hideTimer;
 	private byte mask;
@@ -81,14 +88,13 @@ public class ControlPanelView extends LinearLayoutCompat implements MainActivity
 	public ControlPanelView(Context context, AttributeSet attrs) {
 		super(context, attrs, R.attr.appControlPanelStyle);
 		gestureDetector = new GestureDetectorCompat(context, this);
-		setOrientation(VERTICAL);
 		inflate(context, R.layout.control_panel_view, this);
 
-		TypedArray ta = context.obtainStyledAttributes(attrs,
-				new int[]{android.R.attr.colorBackground, R.attr.textAppearanceBody1},
+		TypedArray ta = context.obtainStyledAttributes(attrs, R.styleable.ControlPanelView,
 				R.attr.appControlPanelStyle, R.style.AppTheme_ControlPanelStyle);
-		setBackgroundColor(ta.getColor(0, Color.TRANSPARENT));
-		timerTextAppearance = ta.getResourceId(1, R.style.TextAppearance_MaterialComponents_Body1);
+		size = ta.getLayoutDimension(R.styleable.ControlPanelView_size, 0);
+		textAppearance = ta.getResourceId(R.styleable.ControlPanelView_textAppearance, 0);
+		setBackgroundColor(ta.getColor(R.styleable.ControlPanelView_android_colorBackground, 0));
 		ta.recycle();
 
 		MainActivityDelegate a = getActivity();
@@ -96,12 +102,10 @@ public class ControlPanelView extends LinearLayoutCompat implements MainActivity
 		a.getPrefs().addBroadcastListener(this);
 
 		ViewGroup g = findViewById(R.id.show_hide_bars);
-		showHideBars = (ImageButton) g.getChildAt(0);
+		showHideBars = (ImageView) g.getChildAt(0);
 		g.setOnClickListener(this::showHideBars);
-		showHideBars.setOnClickListener(this::showHideBars);
 		g = findViewById(R.id.control_menu_button);
 		g.setOnClickListener(this::showMenu);
-		g.getChildAt(1).setOnClickListener(this::showMenu);
 		setShowHideBarsIcon(a);
 	}
 
@@ -126,6 +130,7 @@ public class ControlPanelView extends LinearLayoutCompat implements MainActivity
 	}
 
 	public void bind(FermataServiceUiBinder b) {
+		computeSize();
 		prefs = b.getMediaSessionCallback().getPlaybackControlPrefs();
 		b.bindControlPanel(this);
 		b.bindPrevButton(findViewById(R.id.control_prev));
@@ -137,6 +142,69 @@ public class ControlPanelView extends LinearLayoutCompat implements MainActivity
 		b.bindProgressTime(findViewById(R.id.seek_time));
 		b.bindProgressTotal(findViewById(R.id.seek_total));
 		b.bound();
+	}
+
+	void computeSize() {
+		MainActivityDelegate a = getActivity();
+		setSize(a.getPrefs().getControlPanelSizePref(a));
+	}
+
+	private void setSize(float scale) {
+		TextView seekTime = findViewById(R.id.seek_time);
+		TextView seekTotal = findViewById(R.id.seek_total);
+		float textSize = getTextAppearanceSize(getContext(), textAppearance) * scale;
+		int textPad = seekTime.getPaddingTop() + seekTime.getPaddingBottom();
+		int pad = 2 * toIntPx(getContext(), 4) + textPad;
+		int iconSize = (int) (textSize + pad);
+		int panelSize = (int) (size * scale);
+		int buttonSize = (int) (panelSize - textSize - pad);
+		ControlPanelSeekView seek = findViewById(R.id.seek_bar);
+
+		if (seek.isEnabled()) {
+			setHeight(seek, iconSize);
+			setSize(R.id.show_hide_bars_icon, iconSize);
+			setSize(R.id.control_menu_button_icon, iconSize);
+			seTextAppearance(seekTime, textSize);
+			seTextAppearance(seekTotal, textSize);
+			setHeight(R.id.control_prev, buttonSize);
+			setHeight(R.id.control_rw, buttonSize);
+			setHeight(R.id.control_play_pause, buttonSize);
+			setHeight(R.id.control_ff, buttonSize);
+		} else {
+			panelSize = buttonSize;
+			setSize(R.id.show_hide_bars_icon, buttonSize);
+			setSize(R.id.control_menu_button_icon, buttonSize);
+			setHeight(R.id.control_prev, buttonSize);
+			setHeight(R.id.control_play_pause, buttonSize);
+		}
+
+		setHeight(R.id.control_next, buttonSize);
+		getLayoutParams().height = panelSize;
+	}
+
+	private void seTextAppearance(TextView t, float size) {
+		t.setTextAppearance(textAppearance);
+		t.setTextSize(COMPLEX_UNIT_PX, size);
+	}
+
+	private void setSize(@IdRes int id, int size) {
+		View v = findViewById(id);
+		ViewGroup.LayoutParams lp = v.getLayoutParams();
+		lp.width = lp.height = size;
+		v.setLayoutParams(lp);
+	}
+
+	private void setHeight(@IdRes int id, int h) {
+		View v = findViewById(id);
+		ViewGroup.LayoutParams lp = v.getLayoutParams();
+		lp.height = h;
+		v.setLayoutParams(lp);
+	}
+
+	private void setHeight(View v, int h) {
+		ViewGroup.LayoutParams lp = v.getLayoutParams();
+		lp.height = h;
+		v.setLayoutParams(lp);
 	}
 
 	public boolean isActive() {
@@ -153,7 +221,7 @@ public class ControlPanelView extends LinearLayoutCompat implements MainActivity
 
 			super.setVisibility(VISIBLE);
 
-			if (a.getPrefs().getHideBarsPref()) {
+			if (a.getPrefs().getHideBarsPref(a)) {
 				a.setBarsHidden(true);
 				setShowHideBarsIcon(a);
 			}
@@ -168,7 +236,7 @@ public class ControlPanelView extends LinearLayoutCompat implements MainActivity
 			}
 		}
 
-		checkPlaybackTimer(a.getMediaSessionCallback());
+		checkPlaybackTimer(a);
 	}
 
 	public void enableVideoMode(@Nullable VideoView v) {
@@ -179,23 +247,23 @@ public class ControlPanelView extends LinearLayoutCompat implements MainActivity
 		a.setBarsHidden(true);
 		setShowHideBarsIcon(a);
 
-		View title = (v != null) ? v.getTitle() : null;
+		View info = (v != null) ? v.getVideoInfoView() : null;
 		View fb = a.getFloatingButton();
 		int delay = getStartDelay();
 
 		if (delay == 0) {
 			fb.setVisibility(GONE);
-			if (title != null) title.setVisibility(GONE);
+			if (info != null) info.setVisibility(GONE);
 			super.setVisibility(GONE);
 		} else {
 			fb.setVisibility(VISIBLE);
-			if (title != null) title.setVisibility(VISIBLE);
+			if (info != null) info.setVisibility(VISIBLE);
 			super.setVisibility(VISIBLE);
-			hideTimer = new HideTimer(title, fb);
-			App.get().getHandler().postDelayed(hideTimer, delay);
+			hideTimer = new HideTimer(a, delay, false, info, fb);
+			a.postDelayed(hideTimer, delay);
 		}
 
-		checkPlaybackTimer(a.getMediaSessionCallback());
+		checkPlaybackTimer(a);
 	}
 
 	public void disableVideoMode() {
@@ -209,7 +277,7 @@ public class ControlPanelView extends LinearLayoutCompat implements MainActivity
 			a.setBarsHidden(false);
 		} else {
 			super.setVisibility(VISIBLE);
-			a.setBarsHidden(a.getPrefs().getHideBarsPref());
+			a.setBarsHidden(a.getPrefs().getHideBarsPref(a));
 		}
 
 		setShowHideBarsIcon(a);
@@ -217,11 +285,13 @@ public class ControlPanelView extends LinearLayoutCompat implements MainActivity
 
 	@Override
 	public boolean onInterceptTouchEvent(MotionEvent e) {
+		MainActivityDelegate a = getActivity();
 		if (hideTimer != null) {
-			hideTimer = new HideTimer(hideTimer.views);
-			FermataApplication.get().getHandler().postDelayed(hideTimer, getTouchDelay());
+			int delay = getTouchDelay();
+			hideTimer = new HideTimer(a, delay, false, hideTimer.views);
+			a.postDelayed(hideTimer, delay);
 		}
-		return getActivity().interceptTouchEvent(e, me -> {
+		return a.interceptTouchEvent(e, me -> {
 			gestureSource = this;
 			gestureDetector.onTouchEvent(me);
 			return super.onTouchEvent(me);
@@ -286,6 +356,12 @@ public class ControlPanelView extends LinearLayoutCompat implements MainActivity
 			}
 
 			onVideoSeek();
+		} else if (e2.getPointerCount() == 2) {
+			if (!getActivity().getPrefs().getChangeBrightnessPref()) return true;
+			MainActivityDelegate a = getActivity();
+			int br = a.getBrightness();
+			br = (distanceY > 0) ? Math.min(255, br + 10) : Math.max(0, br - 10);
+			a.setBrightness(br);
 		} else {
 			AudioManager amgr = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
 			if (amgr == null) return false;
@@ -305,28 +381,40 @@ public class ControlPanelView extends LinearLayoutCompat implements MainActivity
 	@Override
 	public boolean onSingleTapConfirmed(MotionEvent e) {
 		if (!(gestureSource instanceof VideoView)) return false;
+		return onTouch((VideoView) gestureSource);
+	}
+
+	public boolean onTouch(VideoView video) {
+		MainActivityDelegate a = getActivity();
+		BodyLayout b = a.getBody();
+
+		if (b.getMode() == BodyLayout.Mode.BOTH) {
+			b.setMode(BodyLayout.Mode.VIDEO);
+			return true;
+		}
 
 		int delay = getTouchDelay();
 		if (delay == 0) return false;
 
-		MainActivityDelegate a = getActivity();
-		View title = ((VideoView) gestureSource).getTitle();
+		View info = video.getVideoInfoView();
 		View fb = a.getFloatingButton();
 
 		if (getVisibility() == VISIBLE) {
 			super.setVisibility(GONE);
-			title.setVisibility(GONE);
 			fb.setVisibility(GONE);
+			if (a.getPrefs().getSysBarsOnVideoTouchPref()) a.setFullScreen(true);
+			if (info != null) info.setVisibility(GONE);
 		} else {
 			super.setVisibility(VISIBLE);
-			title.setVisibility(VISIBLE);
 			fb.setVisibility(VISIBLE);
+			if (a.getPrefs().getSysBarsOnVideoTouchPref()) a.setFullScreen(false);
+			if (info != null) info.setVisibility(VISIBLE);
 			clearFocus();
-			hideTimer = new HideTimer(title, fb);
-			App.get().getHandler().postDelayed(hideTimer, delay);
+			hideTimer = new HideTimer(a, delay, false, info, fb);
+			a.postDelayed(hideTimer, delay);
 		}
 
-		checkPlaybackTimer(a.getMediaSessionCallback());
+		checkPlaybackTimer(a);
 		return true;
 	}
 
@@ -344,15 +432,21 @@ public class ControlPanelView extends LinearLayoutCompat implements MainActivity
 			else return;
 		}
 
-		View title = vv.getTitle();
+		View info = vv.getVideoInfoView();
 		View fb = a.getFloatingButton();
+		int delay = getSeekDelay();
 		super.setVisibility(VISIBLE);
-		title.setVisibility(VISIBLE);
 		fb.setVisibility(VISIBLE);
+		if (info != null) info.setVisibility(VISIBLE);
 		clearFocus();
-		hideTimer = new HideTimer(title, fb);
-		App.get().getHandler().postDelayed(hideTimer, getSeekDelay());
-		checkPlaybackTimer(a.getMediaSessionCallback());
+		hideTimer = new HideTimer(a, delay, true, info, fb);
+		a.postDelayed(hideTimer, delay);
+		checkPlaybackTimer(a);
+	}
+
+	public boolean isVideoSeekMode() {
+		HideTimer t = hideTimer;
+		return (t != null) && t.seekMode;
 	}
 
 	@Override
@@ -365,14 +459,48 @@ public class ControlPanelView extends LinearLayoutCompat implements MainActivity
 
 	@Override
 	public void onPreferenceChanged(PreferenceStore store, List<Pref<?>> prefs) {
-		if (mask != MASK_VISIBLE) return;
+		MainActivityDelegate a = getActivity();
 
-		if (prefs.contains(MainActivityPrefs.HIDE_BARS)) {
-			MainActivityDelegate a = getActivity();
-			if (a.getPrefs().getHideBarsPref()) a.setBarsHidden(getVisibility() == VISIBLE);
+		if (MainActivityPrefs.hasControlPanelSizePref(a, prefs)) {
+			setSize(a.getPrefs().getControlPanelSizePref(a));
+		} else if ((mask == MASK_VISIBLE) && MainActivityPrefs.hasHideBarsPref(a, prefs)) {
+			if (a.getPrefs().getHideBarsPref(a)) a.setBarsHidden(getVisibility() == VISIBLE);
 			else if (a.isBarsHidden()) a.setBarsHidden(false);
 			setShowHideBarsIcon(a);
 		}
+	}
+
+	public View focusSearch() {
+		View v = findViewById(R.id.seek_bar);
+		return isVisible(v) ? v : findViewById(R.id.control_play_pause);
+	}
+
+	@Override
+	public View focusSearch(View focused, int direction) {
+		if (focused == null) return super.focusSearch(null, direction);
+
+		if (direction == FOCUS_UP) {
+			if (isLine1(focused)) {
+				MainActivityDelegate a = getActivity();
+				if (a.isVideoMode()) return a.getBody().getVideoView();
+				View v = MediaItemListView.focusSearchLast(getContext(), focused);
+				if (v != null) return v;
+			} else {
+				if (!isVisible(findViewById(R.id.seek_bar))) return findViewById(R.id.control_menu_button);
+			}
+		} else if (direction == FOCUS_DOWN) {
+			if (!isLine1(focused)) {
+				NavBarView n = getActivity().getNavBar();
+				if (isVisible(n) && n.isBottom()) return n.focusSearch();
+			}
+		}
+
+		return super.focusSearch(focused, direction);
+	}
+
+	private boolean isLine1(View v) {
+		int id = v.getId();
+		return id == R.id.seek_bar || id == R.id.show_hide_bars || id == R.id.control_menu_button;
 	}
 
 	private void showHideBars(View v) {
@@ -400,7 +528,8 @@ public class ControlPanelView extends LinearLayoutCompat implements MainActivity
 	}
 
 	private void setShowHideBarsIcon(MainActivityDelegate a) {
-		showHideBars.setImageResource(a.isBarsHidden() ? R.drawable.expand : R.drawable.collapse);
+		a.post(() -> showHideBars.setImageResource(
+				a.isBarsHidden() ? R.drawable.expand : R.drawable.collapse));
 	}
 
 	private MainActivityDelegate getActivity() {
@@ -412,7 +541,8 @@ public class ControlPanelView extends LinearLayoutCompat implements MainActivity
 		return true;
 	}
 
-	private void checkPlaybackTimer(MediaSessionCallback cb) {
+	private void checkPlaybackTimer(MainActivityDelegate a) {
+		MediaSessionCallback cb = a.getMediaSessionCallback();
 		int t = cb.getPlaybackTimer();
 
 		if (t <= 0) {
@@ -426,7 +556,7 @@ public class ControlPanelView extends LinearLayoutCompat implements MainActivity
 				playbackTimer = new MaterialTextView(ctx);
 				((ViewGroup) getParent()).addView(playbackTimer);
 				playbackTimer.setBackgroundResource(R.drawable.playback_timer_bg);
-				playbackTimer.setTextAppearance(timerTextAppearance);
+				playbackTimer.setTextAppearance(textAppearance);
 				ViewGroup.LayoutParams lp = playbackTimer.getLayoutParams();
 
 				if (lp instanceof ConstraintLayout.LayoutParams) {
@@ -437,10 +567,7 @@ public class ControlPanelView extends LinearLayoutCompat implements MainActivity
 					clp.resolveLayoutDirection(LAYOUT_DIRECTION_LTR);
 				}
 
-				playbackTimer.setOnClickListener(v -> {
-					MainActivityDelegate a = getActivity();
-					getMenu(a).show(b -> new TimerMenuHandler(a).build(b));
-				});
+				playbackTimer.setOnClickListener(v -> getMenu(a).show(b -> new TimerMenuHandler(a).build(b)));
 			}
 
 			if (getVisibility() != VISIBLE) {
@@ -454,7 +581,7 @@ public class ControlPanelView extends LinearLayoutCompat implements MainActivity
 			}
 
 			playbackTimer.setVisibility(VISIBLE);
-			App.get().getHandler().postDelayed(() -> checkPlaybackTimer(cb), 1000);
+			a.postDelayed(() -> checkPlaybackTimer(a), 1000);
 		}
 	}
 
@@ -473,9 +600,10 @@ public class ControlPanelView extends LinearLayoutCompat implements MainActivity
 			MediaEngine eng = a.getMediaSessionCallback().getEngine();
 			if (eng == null) return;
 
+			boolean stream = (pi.isStream());
 			eng.contributeToMenu(b);
 
-			if (!pi.isExternal()) {
+			if (!stream && !pi.isExternal()) {
 				if (pi.isRepeatItemEnabled() || p.getRepeatPref()) {
 					b.addItem(R.id.repeat, R.drawable.repeat_filled, R.string.repeat)
 							.setSubmenu(s -> {
@@ -497,7 +625,11 @@ public class ControlPanelView extends LinearLayoutCompat implements MainActivity
 				b.addItem(R.id.audio_effects_fragment, R.drawable.equalizer, R.string.audio_effects);
 			}
 
-			b.addItem(R.id.speed, R.drawable.speed, R.string.speed).setSubmenu(s -> new SpeedMenuHandler().build(s, getItem()));
+			if (!stream) {
+				b.addItem(R.id.speed, R.drawable.speed, R.string.speed)
+						.setSubmenu(s -> new SpeedMenuHandler().build(s, getItem()));
+			}
+
 			b.addItem(R.id.timer, R.drawable.timer, R.string.timer).setSubmenu(s -> new TimerMenuHandler(a).build(s));
 		}
 
@@ -593,27 +725,23 @@ public class ControlPanelView extends LinearLayoutCompat implements MainActivity
 			PlayableItem pi;
 			MediaEngine eng;
 
-			switch (id) {
-				case R.id.audio_effects_fragment:
-					eng = getActivity().getMediaSessionCallback().getEngine();
-					if ((eng != null) && (eng.getAudioEffects() != null))
-						getActivity().showFragment(R.id.audio_effects_fragment);
-					return true;
-				case R.id.repeat_track:
-				case R.id.repeat_folder:
-				case R.id.repeat_disable_all:
-					pi = (PlayableItem) getItem();
-					pi.setRepeatItemEnabled(id == R.id.repeat_track);
-					pi.getParent().getPrefs().setRepeatPref(id == R.id.repeat_folder);
-					return true;
-				case R.id.shuffle_enable:
-				case R.id.shuffle_disable:
-					pi = (PlayableItem) getItem();
-					pi.getParent().getPrefs().setShufflePref(id == R.id.shuffle_enable);
-					return true;
-				default:
-					return super.menuItemSelected(i);
+			if (id == R.id.audio_effects_fragment) {
+				eng = getActivity().getMediaSessionCallback().getEngine();
+				if ((eng != null) && (eng.getAudioEffects() != null))
+					getActivity().showFragment(R.id.audio_effects_fragment);
+				return true;
+			} else if (id == R.id.repeat_track || id == R.id.repeat_folder || id == R.id.repeat_disable_all) {
+				pi = (PlayableItem) getItem();
+				pi.setRepeatItemEnabled(id == R.id.repeat_track);
+				pi.getParent().getPrefs().setRepeatPref(id == R.id.repeat_folder);
+				return true;
+			} else if (id == R.id.shuffle_enable || id == R.id.shuffle_disable) {
+				pi = (PlayableItem) getItem();
+				pi.getParent().getPrefs().setShufflePref(id == R.id.shuffle_enable);
+				return true;
 			}
+
+			return super.menuItemSelected(i);
 		}
 	}
 
@@ -732,17 +860,17 @@ public class ControlPanelView extends LinearLayoutCompat implements MainActivity
 	private final class TimerMenuHandler extends BasicPreferenceStore implements OverlayMenu.CloseHandler {
 		private final Pref<IntSupplier> H = Pref.i("H", 0);
 		private final Pref<IntSupplier> M = Pref.i("M", 0);
-		private final MediaSessionCallback cb;
+		private final MainActivityDelegate activity;
 		private boolean changed;
 		private boolean closed;
 
 		TimerMenuHandler(MainActivityDelegate activity) {
-			cb = activity.getMediaSessionCallback();
+			this.activity = activity;
 		}
 
 		void build(OverlayMenu.Builder b) {
 			PreferenceSet set = new PreferenceSet();
-			int time = cb.getPlaybackTimer();
+			int time = activity.getMediaSessionCallback().getPlaybackTimer();
 
 			if (time > 0) {
 				int h = time / 3600;
@@ -786,16 +914,13 @@ public class ControlPanelView extends LinearLayoutCompat implements MainActivity
 			if (!changed) return;
 			int h = getIntPref(H);
 			int m = getIntPref(M);
-			cb.setPlaybackTimer(h * 3600 + m * 60);
-			checkPlaybackTimer(cb);
+			activity.getMediaSessionCallback().setPlaybackTimer(h * 3600 + m * 60);
+			checkPlaybackTimer(activity);
 		}
 
 		private void startTimer() {
-			App.get().getHandler().postDelayed(() -> {
-				if (!closed) {
-					MainActivityDelegate a = getActivity();
-					if (a != null) getMenu(a).hide();
-				}
+			activity.postDelayed(() -> {
+				if (!closed) getMenu(getActivity()).hide();
 			}, 60000);
 		}
 	}
@@ -813,20 +938,33 @@ public class ControlPanelView extends LinearLayoutCompat implements MainActivity
 	}
 
 	private final class HideTimer implements Runnable {
+		final MainActivityDelegate activity;
+		final int delay;
+		final boolean seekMode;
 		final View[] views;
 
-		HideTimer(View... views) {
+		HideTimer(MainActivityDelegate activity, int delay, boolean seekMode, View... views) {
+			this.activity = activity;
+			this.delay = delay;
+			this.seekMode = seekMode;
 			this.views = views;
 		}
 
 		@Override
 		public void run() {
-			if ((hideTimer == this) && ((mask & MASK_VIDEO_MODE) != 0)) {
-				ControlPanelView.super.setVisibility(GONE);
+			if ((hideTimer != this) || ((mask & MASK_VIDEO_MODE) == 0)) return;
 
-				for (View v : views) {
-					v.setVisibility(GONE);
-				}
+			if (ControlPanelView.this.hasFocus()) {
+				hideTimer = new HideTimer(activity, delay, seekMode, views);
+				activity.postDelayed(hideTimer, delay);
+				return;
+			}
+
+			if (activity.getPrefs().getSysBarsOnVideoTouchPref()) activity.setFullScreen(true);
+			ControlPanelView.super.setVisibility(GONE);
+
+			for (View v : views) {
+				if (v != null) v.setVisibility(GONE);
 			}
 		}
 	}

@@ -1,8 +1,13 @@
 package me.aap.fermata.media.service;
 
+import static android.support.v4.media.session.PlaybackStateCompat.REPEAT_MODE_INVALID;
+import static android.support.v4.media.session.PlaybackStateCompat.SHUFFLE_MODE_INVALID;
+import static java.util.Objects.requireNonNull;
+
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ResolveInfo;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.os.Message;
@@ -15,15 +20,10 @@ import java.util.Collections;
 import me.aap.fermata.media.lib.MediaLib.PlayableItem;
 import me.aap.utils.log.Log;
 
-import static android.support.v4.media.session.PlaybackStateCompat.REPEAT_MODE_INVALID;
-import static android.support.v4.media.session.PlaybackStateCompat.SHUFFLE_MODE_INVALID;
-import static java.util.Objects.requireNonNull;
-
 /**
  * @author Andrey Pavlenko
  */
 class FermataToControlConnection extends ControlServiceConnection {
-	static final String PKG_ID = "me.aap.fermata.auto.control";
 
 	FermataToControlConnection(FermataMediaService service) {
 		super(service);
@@ -31,6 +31,22 @@ class FermataToControlConnection extends ControlServiceConnection {
 
 	public FermataMediaService getService() {
 		return (FermataMediaService) service;
+	}
+
+	public static String getPkgId(Context ctx) {
+		Intent i = new Intent(ControlServiceConnection.ACTION_CONTROL_SERVICE);
+		String thisPkg = ctx.getPackageName();
+
+		for (ResolveInfo ri : ctx.getPackageManager().queryIntentServices(i, 0)) {
+			if ((ri.serviceInfo == null) || thisPkg.equals(ri.serviceInfo.packageName)) continue;
+			if ("me.aap.fermata".equals(ri.serviceInfo.packageName)) continue;
+			String pkg = ri.serviceInfo.packageName;
+			Log.i("Fermata Control application found: ", pkg);
+			return pkg;
+		}
+
+		Log.w("Fermata Control application not found!");
+		return ctx.getPackageName().replace("me.aap.fermata.auto", "me.aap.fermata.auto.control");
 	}
 
 	@Override
@@ -92,6 +108,9 @@ class FermataToControlConnection extends ControlServiceConnection {
 				b = msg.getData();
 				getService().callback.onCustomAction(requireNonNull(b.getString(KEY)), null);
 				break;
+			case MSG_PLAY_FROM_SEARCH:
+				getService().callback.onPlayFromSearch(msg.getData().getString(KEY), null);
+				break;
 			default:
 				Log.e("Unknown message received: ", msg.what);
 		}
@@ -121,7 +140,8 @@ class FermataToControlConnection extends ControlServiceConnection {
 	public void connect() {
 		try {
 			Intent i = new Intent(ACTION_CONTROL_SERVICE);
-			i.setComponent(new ComponentName(PKG_ID, "me.aap.fermata.auto.control.FermataMediaServiceControl"));
+			String pkg = getPkgId(service);
+			i.setComponent(new ComponentName(pkg, "me.aap.fermata.auto.control.FermataMediaServiceControl"));
 			getService().bindService(i, this, Context.BIND_AUTO_CREATE);
 		} catch (Exception ex) {
 			Log.d(ex, "Failed to connect to remote service");

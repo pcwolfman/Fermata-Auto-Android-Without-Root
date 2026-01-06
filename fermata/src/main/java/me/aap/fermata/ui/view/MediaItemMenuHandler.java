@@ -1,35 +1,5 @@
 package me.aap.fermata.ui.view;
 
-import java.util.Collections;
-import java.util.List;
-
-import me.aap.fermata.R;
-import me.aap.fermata.media.engine.MediaEngine;
-import me.aap.fermata.media.engine.MediaEngineManager;
-import me.aap.fermata.media.lib.MediaLib.BrowsableItem;
-import me.aap.fermata.media.lib.MediaLib.Favorites;
-import me.aap.fermata.media.lib.MediaLib.Folders;
-import me.aap.fermata.media.lib.MediaLib.Item;
-import me.aap.fermata.media.lib.MediaLib.PlayableItem;
-import me.aap.fermata.media.lib.MediaLib.Playlist;
-import me.aap.fermata.media.pref.BrowsableItemPrefs;
-import me.aap.fermata.media.pref.MediaLibPrefs;
-import me.aap.fermata.media.pref.MediaPrefs;
-import me.aap.fermata.media.pref.PlayableItemPrefs;
-import me.aap.fermata.ui.activity.MainActivityDelegate;
-import me.aap.fermata.ui.fragment.MediaLibFragment;
-import me.aap.utils.async.FutureSupplier;
-import me.aap.utils.function.IntSupplier;
-import me.aap.utils.function.Supplier;
-import me.aap.utils.pref.BasicPreferenceStore;
-import me.aap.utils.pref.PreferenceSet;
-import me.aap.utils.pref.PreferenceStore;
-import me.aap.utils.pref.PreferenceStore.Pref;
-import me.aap.utils.text.TextUtils;
-import me.aap.utils.ui.fragment.ActivityFragment;
-import me.aap.utils.ui.menu.OverlayMenu;
-import me.aap.utils.ui.menu.OverlayMenuItem;
-
 import static java.util.Objects.requireNonNull;
 import static me.aap.fermata.media.pref.MediaPrefs.SCALE_16_9;
 import static me.aap.fermata.media.pref.MediaPrefs.SCALE_4_3;
@@ -44,6 +14,46 @@ import static me.aap.fermata.ui.fragment.SettingsFragment.addDelayPrefs;
 import static me.aap.fermata.ui.fragment.SettingsFragment.addSubtitlePrefs;
 import static me.aap.utils.async.Completed.completed;
 import static me.aap.utils.async.Completed.completedVoid;
+
+import android.content.Context;
+
+import java.util.Collections;
+import java.util.List;
+
+import me.aap.fermata.R;
+import me.aap.fermata.media.engine.MediaEngine;
+import me.aap.fermata.media.engine.MediaEngineManager;
+import me.aap.fermata.media.lib.FileItem;
+import me.aap.fermata.media.lib.FolderItem;
+import me.aap.fermata.media.lib.M3uItem;
+import me.aap.fermata.media.lib.MediaLib.ArchiveItem;
+import me.aap.fermata.media.lib.MediaLib.BrowsableItem;
+import me.aap.fermata.media.lib.MediaLib.Favorites;
+import me.aap.fermata.media.lib.MediaLib.Folders;
+import me.aap.fermata.media.lib.MediaLib.Item;
+import me.aap.fermata.media.lib.MediaLib.PlayableItem;
+import me.aap.fermata.media.lib.MediaLib.Playlist;
+import me.aap.fermata.media.lib.MediaLib.StreamItem;
+import me.aap.fermata.media.pref.BrowsableItemPrefs;
+import me.aap.fermata.media.pref.MediaLibPrefs;
+import me.aap.fermata.media.pref.MediaPrefs;
+import me.aap.fermata.media.pref.PlayableItemPrefs;
+import me.aap.fermata.ui.activity.MainActivityDelegate;
+import me.aap.fermata.ui.fragment.MediaLibFragment;
+import me.aap.utils.async.FutureSupplier;
+import me.aap.utils.function.IntSupplier;
+import me.aap.utils.function.Supplier;
+import me.aap.utils.log.Log;
+import me.aap.utils.pref.BasicPreferenceStore;
+import me.aap.utils.pref.PreferenceSet;
+import me.aap.utils.pref.PreferenceStore;
+import me.aap.utils.pref.PreferenceStore.Pref;
+import me.aap.utils.text.TextUtils;
+import me.aap.utils.ui.UiUtils;
+import me.aap.utils.ui.fragment.ActivityFragment;
+import me.aap.utils.ui.menu.OverlayMenu;
+import me.aap.utils.ui.menu.OverlayMenuItem;
+import me.aap.utils.vfs.VirtualResource;
 
 /**
  * @author Andrey Pavlenko
@@ -78,20 +88,40 @@ public class MediaItemMenuHandler implements OverlayMenu.SelectionHandler {
 	}
 
 	public FutureSupplier<Void> build(OverlayMenu.Builder builder) {
+		FutureSupplier<Void> r;
 		MainActivityDelegate a = getMainActivity();
-		builder.setSelectionHandler(this);
 
 		if (item instanceof PlayableItem) {
 			buildPlayableMenu(a, builder, (PlayableItem) item, true);
-			return completedVoid();
+			r = completedVoid();
+		} else if (item instanceof BrowsableItem) {
+			r = buildBrowsableMenu(a, builder, (BrowsableItem) item);
 		} else {
-			return buildBrowsableMenu(a, builder, (BrowsableItem) item);
+			r = completedVoid();
 		}
+
+		return r.onSuccess(v -> {
+			MediaLibFragment f = a.getActiveMediaLibFragment();
+			if (f != null) f.contributeToContextMenu(builder, this);
+			if (canDelete()) builder.addItem(R.id.delete, R.drawable.delete, R.string.delete);
+			builder.setSelectionHandler(this);
+		});
+	}
+
+	private boolean canDelete() {
+		BrowsableItem p = item.getParent();
+		if ((p == null) || (p.getParent() == null)) return false;
+		return (((item instanceof FileItem) || (item instanceof FolderItem) || (item instanceof M3uItem))
+				&& item.getResource().canDelete());
 	}
 
 	protected void buildPlayableMenu(MainActivityDelegate a, OverlayMenu.Builder b, PlayableItem pi,
 																	 boolean initRepeat) {
 		if (pi.isExternal()) return;
+
+		if (pi instanceof StreamItem) {
+			b.addItem(R.id.programme_guide, R.drawable.epg, R.string.programme_guide);
+		}
 
 		if (pi.isFavoriteItem()) {
 			b.addItem(R.id.favorites_remove, R.drawable.favorite_filled, R.string.favorites_remove);
@@ -99,17 +129,21 @@ public class MediaItemMenuHandler implements OverlayMenu.SelectionHandler {
 			b.addItem(R.id.favorites_add, R.drawable.favorite, R.string.favorites_add);
 		}
 
-		if (pi.getPrefs().hasPref(BOOKMARKS)) {
-			b.addItem(R.id.bookmarks, R.drawable.bookmark_filled, R.string.bookmarks).setFutureSubmenu(this::buildBookmarksMenu);
-		} else {
-			b.addItem(R.id.bookmark_create, R.drawable.bookmark, R.string.create_bookmark).setSubmenu(this::buildCreateBookmarkMenu);
-		}
-
-		if (initRepeat) {
-			if (pi.isRepeatItemEnabled()) {
-				b.addItem(R.id.repeat_disable, R.drawable.repeat_filled, R.string.repeat_disable);
+		if (!(item instanceof StreamItem) && !(item instanceof ArchiveItem)) {
+			if (pi.getPrefs().hasPref(BOOKMARKS)) {
+				b.addItem(R.id.bookmarks, R.drawable.bookmark_filled, R.string.bookmarks)
+						.setFutureSubmenu(this::buildBookmarksMenu);
 			} else {
-				b.addItem(R.id.repeat_enable, R.drawable.repeat, R.string.repeat);
+				b.addItem(R.id.bookmark_create, R.drawable.bookmark, R.string.create_bookmark)
+						.setSubmenu(this::buildCreateBookmarkMenu);
+			}
+
+			if (initRepeat) {
+				if (pi.isRepeatItemEnabled()) {
+					b.addItem(R.id.repeat_disable, R.drawable.repeat_filled, R.string.repeat_disable);
+				} else {
+					b.addItem(R.id.repeat_enable, R.drawable.repeat, R.string.repeat);
+				}
 			}
 		}
 
@@ -154,12 +188,17 @@ public class MediaItemMenuHandler implements OverlayMenu.SelectionHandler {
 				b.addItem(R.id.bookmarks, R.drawable.bookmark_filled, R.string.bookmarks).setFutureSubmenu(this::buildBookmarksMenu);
 			}
 			if (!(bi instanceof Playlist)) {
-				a.addPlaylistMenu(b, bi.getPlayableChildren(true), bi::getName);
+				a.addPlaylistMenu(b, () -> bi.getPlayableChildren(true), bi::getName);
 			}
 
 			b.addItem(R.id.playback_settings, R.drawable.playback_settings, R.string.playback_settings)
-					.setSubmenu(sb -> sb.addItem(R.id.play_next, R.string.play_next_on_completion)
-							.setChecked(bi.getPrefs().getPlayNextPref()).setHandler(this));
+					.setSubmenu(sb -> {
+						sb.withSelectionHandler(this);
+						sb.addItem(R.id.watched_threshold, R.string.watched_threshold)
+								.setSubmenu(this::buildWatchedDelayMenu);
+						sb.addItem(R.id.play_next, R.string.play_next_on_completion)
+								.setChecked(bi.getPrefs().getPlayNextPref());
+					});
 
 			addMediaEngineMenu(a, b);
 			return completedVoid();
@@ -176,11 +215,11 @@ public class MediaItemMenuHandler implements OverlayMenu.SelectionHandler {
 	protected void buildMediaEngineMenu(OverlayMenu.Builder b) {
 		b.setSelectionHandler(this);
 
-		if (item instanceof BrowsableItem) {
+		if (item instanceof PlayableItem) {
+			buildMediaEngMenu(b, ((PlayableItem) item).isVideo());
+		} else if (item instanceof BrowsableItem) {
 			b.addItem(R.id.preferred_audio_engine, R.string.preferred_audio_engine).setSubmenu(this::buildAudioEngMenu);
 			b.addItem(R.id.preferred_video_engine, R.string.preferred_video_engine).setSubmenu(this::buildVideoEngMenu);
-		} else {
-			buildMediaEngMenu(b, ((PlayableItem) item).isVideo());
 		}
 	}
 
@@ -231,6 +270,8 @@ public class MediaItemMenuHandler implements OverlayMenu.SelectionHandler {
 			} else {
 				b.addItem(R.id.mark_watched, R.string.mark_watched);
 			}
+			b.addItem(R.id.watched_threshold, R.string.watched_threshold)
+					.setSubmenu(this::buildWatchedDelayMenu);
 		}
 
 		b.addItem(R.id.video_scaling, R.string.video_scaling).setSubmenu(this::buildVideoScalingMenu);
@@ -257,14 +298,16 @@ public class MediaItemMenuHandler implements OverlayMenu.SelectionHandler {
 			s.addItem(R.id.bookmark_remove_all_confirm, R.string.remove_all_bookmarks);
 		});
 
-		if (item instanceof BrowsableItem) {
+		if (item instanceof PlayableItem) {
+			addBookmarks(b, Collections.singletonList((PlayableItem) item));
+			b.addItem(R.id.bookmark_create, R.string.create_bookmark).setSubmenu(this::buildCreateBookmarkMenu);
+			return completedVoid();
+		} else if (item instanceof BrowsableItem) {
 			return ((BrowsableItem) item).getPlayableChildren(true).main().then(items -> {
 				addBookmarks(b, items);
 				return completedVoid();
 			});
 		} else {
-			addBookmarks(b, Collections.singletonList((PlayableItem) item));
-			b.addItem(R.id.bookmark_create, R.string.create_bookmark).setSubmenu(this::buildCreateBookmarkMenu);
 			return completedVoid();
 		}
 	}
@@ -292,7 +335,7 @@ public class MediaItemMenuHandler implements OverlayMenu.SelectionHandler {
 			});
 		} else {
 			Bookmark bm = i.getData();
-			getMainActivity().getMediaServiceBinder().playItem(bm.item, bm.time * 1000);
+			getMainActivity().getMediaServiceBinder().playItem(bm.item, bm.time * 1000L);
 		}
 
 		return true;
@@ -335,121 +378,133 @@ public class MediaItemMenuHandler implements OverlayMenu.SelectionHandler {
 		prefSet.addToMenu(b, true);
 	}
 
+	private void buildWatchedDelayMenu(OverlayMenu.Builder b) {
+		PreferenceSet prefSet = new PreferenceSet();
+		prefSet.addIntPref(o -> {
+			o.store = item.getPrefs();
+			o.pref = MediaPrefs.WATCHED_THRESHOLD;
+			o.title = R.string.watched_threshold;
+			o.subtitle = R.string.watched_threshold_sub;
+			o.seekMin = 0;
+			o.seekMax = 100;
+			o.seekScale = 5;
+		});
+		prefSet.addToMenu(b, true);
+	}
+
 	@Override
 	public boolean menuItemSelected(OverlayMenuItem i) {
 		int id = i.getItemId();
 		MediaLibFragment f;
 		Item item = getItem();
 
-		switch (id) {
-			case R.id.folders_remove:
-				Folders folders = item.getLib().getFolders();
-				folders.removeItem(item);
-				break;
-			case R.id.favorites_add:
-				if (item instanceof BrowsableItem) {
-					((BrowsableItem) item).getPlayableChildren(true).main().onSuccess(list -> {
-						item.getLib().getFavorites().addItems(list);
-						MediaLibFragment mf = getMainActivity().getMediaLibFragment(R.id.favorites_fragment);
-						if (mf != null) mf.reload();
-					});
-				} else {
-					item.getLib().getFavorites().addItem((PlayableItem) item);
-					f = getMainActivity().getMediaLibFragment(R.id.favorites_fragment);
-					if (f != null) f.reload();
-				}
-
-				break;
-			case R.id.favorites_remove:
-				item.getLib().getFavorites().removeItem((PlayableItem) item);
+		if (id == R.id.folders_remove) {
+			Folders folders = item.getLib().getFolders();
+			folders.removeItem(item);
+		} else if (id == R.id.programme_guide) {
+			ActivityFragment af = getMainActivity().getActiveFragment();
+			if (af instanceof MediaLibFragment)
+				((MediaLibFragment) af).getAdapter().openEpg((StreamItem) item);
+		} else if (id == R.id.favorites_add) {
+			if (item instanceof PlayableItem) {
+				item.getLib().getFavorites().addItem((PlayableItem) item);
 				f = getMainActivity().getMediaLibFragment(R.id.favorites_fragment);
 				if (f != null) f.reload();
-				break;
-			case R.id.playlist_remove_item:
-				getMainActivity().removeFromPlaylist(
-						(Playlist) requireNonNull(item.getParent()),
-						Collections.singletonList((PlayableItem) item));
-				break;
-			case R.id.playlist_remove:
-				Playlist p = i.getData();
-				p.getParent().removeItems(Collections.singletonList(p));
-				break;
-			case R.id.bookmark_remove_all_confirm:
-				if ((item instanceof BrowsableItem)) {
-					((BrowsableItem) item).getPlayableChildren(true).main().onSuccess(list -> {
-						for (PlayableItem pi : list) {
-							pi.getPrefs().removePref(BOOKMARKS);
-						}
-					});
-				} else {
-					((PlayableItem) item).getPrefs().removePref(BOOKMARKS);
-				}
+			} else if (item instanceof BrowsableItem) {
+				((BrowsableItem) item).getPlayableChildren(true).main().onSuccess(list -> {
+					item.getLib().getFavorites().addItems(list);
+					MediaLibFragment mf = getMainActivity().getMediaLibFragment(R.id.favorites_fragment);
+					if (mf != null) mf.reload();
+				});
+			}
+		} else if (id == R.id.favorites_remove) {
+			item.getLib().getFavorites().removeItem((PlayableItem) item);
+			f = getMainActivity().getMediaLibFragment(R.id.favorites_fragment);
+			if (f != null) f.reload();
+		} else if (id == R.id.playlist_remove_item) {
+			getMainActivity().removeFromPlaylist(
+					(Playlist) requireNonNull(item.getParent()),
+					Collections.singletonList((PlayableItem) item));
+		} else if (id == R.id.playlist_remove) {
+			Playlist p = i.getData();
+			p.getParent().removeItems(Collections.singletonList(p));
+		} else if (id == R.id.bookmark_remove_all_confirm) {
+			if ((item instanceof PlayableItem)) {
+				((PlayableItem) item).getPrefs().removePref(BOOKMARKS);
+			} else if ((item instanceof BrowsableItem)) {
+				((BrowsableItem) item).getPlayableChildren(true).main().onSuccess(list -> {
+					for (PlayableItem pi : list) {
+						pi.getPrefs().removePref(BOOKMARKS);
+					}
+				});
+			}
+		} else if (id == R.id.repeat_enable || id == R.id.repeat_disable) {
+			((PlayableItem) item).setRepeatItemEnabled(id == R.id.repeat_enable);
+		} else if (id == R.id.play_next) {
+			BrowsableItemPrefs brPrefs = ((BrowsableItem) item).getPrefs();
+			brPrefs.setPlayNextPref(!brPrefs.getPlayNextPref());
+		} else if (id == R.id.mark_watched || id == R.id.mark_unwatched) {
+			((PlayableItem) item).getPrefs().setWatchedPref(id == R.id.mark_watched);
 
-				break;
-			case R.id.repeat_enable:
-			case R.id.repeat_disable:
-				((PlayableItem) item).setRepeatItemEnabled(id == R.id.repeat_enable);
-				break;
-			case R.id.play_next:
-				BrowsableItemPrefs brPrefs = ((BrowsableItem) item).getPrefs();
-				brPrefs.setPlayNextPref(!brPrefs.getPlayNextPref());
-				break;
-			case R.id.mark_watched:
-			case R.id.mark_unwatched:
-				((PlayableItem) item).getPrefs().setWatchedPref(id == R.id.mark_watched);
-
-				if (view != null) {
-					view.refresh();
-				} else {
-					ActivityFragment mf = getMainActivity().getActiveFragment();
-					if (mf instanceof MediaLibFragment) ((MediaLibFragment) mf).getAdapter().refresh();
-				}
-
-				break;
-			case R.id.preferred_audio_engine_default:
-			case R.id.preferred_video_engine_default:
-				item.getPrefs().removePref((id == R.id.preferred_audio_engine_default)
-						? MediaPrefs.AUDIO_ENGINE : MediaPrefs.VIDEO_ENGINE);
-				break;
-			case R.id.preferred_audio_engine_mp:
-				item.getPrefs().setAudioEnginePref(MediaPrefs.MEDIA_ENG_MP);
-				break;
-			case R.id.preferred_video_engine_mp:
-				item.getPrefs().setVideoEnginePref(MediaPrefs.MEDIA_ENG_MP);
-				break;
-			case R.id.preferred_audio_engine_exo:
-				item.getPrefs().setAudioEnginePref(MediaPrefs.MEDIA_ENG_EXO);
-				break;
-			case R.id.preferred_video_engine_exo:
-				item.getPrefs().setVideoEnginePref(MediaPrefs.MEDIA_ENG_EXO);
-				break;
-			case R.id.preferred_audio_engine_vlc:
-				item.getPrefs().setAudioEnginePref(MediaPrefs.MEDIA_ENG_VLC);
-				break;
-			case R.id.preferred_video_engine_vlc:
-				item.getPrefs().setVideoEnginePref(MediaPrefs.MEDIA_ENG_VLC);
-				break;
-			case R.id.video_scaling_default:
-				item.getPrefs().removePref(VIDEO_SCALE);
-				break;
-			case R.id.video_scaling_best:
-				item.getPrefs().setVideoScalePref(SCALE_BEST);
-				break;
-			case R.id.video_scaling_fill:
-				item.getPrefs().setVideoScalePref(SCALE_FILL);
-				break;
-			case R.id.video_scaling_orig:
-				item.getPrefs().setVideoScalePref(SCALE_ORIGINAL);
-				break;
-			case R.id.video_scaling_4:
-				item.getPrefs().setVideoScalePref(SCALE_4_3);
-				break;
-			case R.id.video_scaling_16:
-				item.getPrefs().setVideoScalePref(SCALE_16_9);
-				break;
+			if (view != null) {
+				view.refresh();
+			} else {
+				ActivityFragment mf = getMainActivity().getActiveFragment();
+				if (mf instanceof MediaLibFragment) ((MediaLibFragment) mf).getAdapter().refresh();
+			}
+		} else if (id == R.id.preferred_audio_engine_default || id == R.id.preferred_video_engine_default) {
+			item.getPrefs().removePref((id == R.id.preferred_audio_engine_default)
+					? MediaPrefs.AUDIO_ENGINE : MediaPrefs.VIDEO_ENGINE);
+		} else if (id == R.id.preferred_audio_engine_mp) {
+			item.getPrefs().setAudioEnginePref(MediaPrefs.MEDIA_ENG_MP);
+		} else if (id == R.id.preferred_video_engine_mp) {
+			item.getPrefs().setVideoEnginePref(MediaPrefs.MEDIA_ENG_MP);
+		} else if (id == R.id.preferred_audio_engine_exo) {
+			item.getPrefs().setAudioEnginePref(MediaPrefs.MEDIA_ENG_EXO);
+		} else if (id == R.id.preferred_video_engine_exo) {
+			item.getPrefs().setVideoEnginePref(MediaPrefs.MEDIA_ENG_EXO);
+		} else if (id == R.id.preferred_audio_engine_vlc) {
+			item.getPrefs().setAudioEnginePref(MediaPrefs.MEDIA_ENG_VLC);
+		} else if (id == R.id.preferred_video_engine_vlc) {
+			item.getPrefs().setVideoEnginePref(MediaPrefs.MEDIA_ENG_VLC);
+		} else if (id == R.id.video_scaling_default) {
+			item.getPrefs().removePref(VIDEO_SCALE);
+		} else if (id == R.id.video_scaling_best) {
+			item.getPrefs().setVideoScalePref(SCALE_BEST);
+		} else if (id == R.id.video_scaling_fill) {
+			item.getPrefs().setVideoScalePref(SCALE_FILL);
+		} else if (id == R.id.video_scaling_orig) {
+			item.getPrefs().setVideoScalePref(SCALE_ORIGINAL);
+		} else if (id == R.id.video_scaling_4) {
+			item.getPrefs().setVideoScalePref(SCALE_4_3);
+		} else if (id == R.id.video_scaling_16) {
+			item.getPrefs().setVideoScalePref(SCALE_16_9);
+		} else if (id == R.id.delete) {
+			UiUtils.showQuestion(getContext(), R.string.delete_file_title,
+					R.string.delete_file_question, R.drawable.delete).onSuccess(v -> {
+				VirtualResource res = item.getResource();
+				res.delete().main().onCompletion((deleted, err) -> {
+					if ((err == null) && deleted) {
+						MainActivityDelegate a = getMainActivity();
+						MediaEngine eng = a.getMediaServiceBinder().getCurrentEngine();
+						if ((eng != null) && item.equals(eng.getSource()))
+							a.getMediaSessionCallback().onSkipToNext();
+						ActivityFragment mf = a.getActiveFragment();
+						if (mf instanceof MediaLibFragment) ((MediaLibFragment) mf).refresh();
+						return;
+					}
+					if (err != null) Log.e(err, "Failed to delete file " + res);
+					Context ctx = getContext();
+					UiUtils.showAlert(ctx, ctx.getString(R.string.delete_file_failed, res.getName()));
+				});
+			});
 		}
 
 		return true;
+	}
+
+	private Context getContext() {
+		return getMenu().getContext();
 	}
 
 	private MainActivityDelegate getMainActivity() {

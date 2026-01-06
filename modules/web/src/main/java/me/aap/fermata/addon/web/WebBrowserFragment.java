@@ -1,6 +1,10 @@
 package me.aap.fermata.addon.web;
 
+import static me.aap.fermata.addon.web.FermataWebClient.isYoutubeUri;
+import static me.aap.fermata.util.Utils.dynCtx;
+
 import android.content.Context;
+import android.content.res.Resources;
 import android.net.Uri;
 import android.os.Bundle;
 import android.view.LayoutInflater;
@@ -11,14 +15,21 @@ import android.webkit.WebView;
 import androidx.annotation.Keep;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.core.content.res.ResourcesCompat;
 
+import java.io.UnsupportedEncodingException;
+import java.net.URLEncoder;
 import java.util.Map;
 
 import me.aap.fermata.addon.AddonManager;
 import me.aap.fermata.addon.web.yt.YoutubeFragment;
 import me.aap.fermata.ui.activity.MainActivityDelegate;
+import me.aap.fermata.ui.activity.MainActivityListener;
+import me.aap.fermata.ui.activity.VoiceCommand;
 import me.aap.fermata.ui.fragment.MainActivityFragment;
+import me.aap.utils.function.BooleanConsumer;
 import me.aap.utils.function.Supplier;
+import me.aap.utils.log.Log;
 import me.aap.utils.pref.BasicPreferenceStore;
 import me.aap.utils.pref.PreferenceSet;
 import me.aap.utils.pref.PreferenceStore;
@@ -27,14 +38,13 @@ import me.aap.utils.ui.menu.OverlayMenu;
 import me.aap.utils.ui.menu.OverlayMenuItem;
 import me.aap.utils.ui.view.ToolBarView;
 
-import static me.aap.fermata.addon.web.FermataWebClient.isYoutubeUri;
-
 /**
  * @author Andrey Pavlenko
  */
 @Keep
 @SuppressWarnings("unused")
-public class WebBrowserFragment extends MainActivityFragment implements OverlayMenu.SelectionHandler {
+public class WebBrowserFragment extends MainActivityFragment
+		implements OverlayMenu.SelectionHandler, MainActivityListener {
 
 	@Override
 	public int getFragmentId() {
@@ -44,6 +54,7 @@ public class WebBrowserFragment extends MainActivityFragment implements OverlayM
 	@Nullable
 	@Override
 	public View onCreateView(@NonNull LayoutInflater inflater, @Nullable ViewGroup container, @Nullable Bundle savedInstanceState) {
+		dynCtx(requireContext());
 		return inflater.inflate(R.layout.browser, container, false);
 	}
 
@@ -59,6 +70,38 @@ public class WebBrowserFragment extends MainActivityFragment implements OverlayM
 		FermataChromeClient chromeClient = new FermataChromeClient(webView, fullScreenView);
 		webView.init(addon, webClient, chromeClient);
 		webView.loadUrl(addon.getLastUrl());
+		MainActivityDelegate.getActivityDelegate(ctx).onSuccess(this::registerListeners);
+	}
+
+	@Override
+	public void onDestroyView() {
+		MainActivityDelegate.getActivityDelegate(requireContext()).onSuccess(this::unregisterListeners);
+		super.onDestroyView();
+	}
+
+	@Override
+	public void onRefresh(BooleanConsumer refreshing) {
+		FermataWebView v = getWebView();
+		if (v != null) {
+			v.getWebViewClient().loading = refreshing;
+			v.reload();
+		}
+	}
+
+	protected void registerListeners(MainActivityDelegate a) {
+		a.addBroadcastListener(this, MainActivityListener.ACTIVITY_DESTROY);
+	}
+
+	protected void unregisterListeners(MainActivityDelegate a) {
+		FermataWebView v = getWebView();
+		WebBrowserAddon addon = getAddon();
+		a.removeBroadcastListener(this);
+		if ((addon != null) && (v != null)) addon.getPreferenceStore().removeBroadcastListener(v);
+	}
+
+	@Override
+	public void onActivityEvent(MainActivityDelegate a, long e) {
+		if (e == ACTIVITY_DESTROY) unregisterListeners(a);
 	}
 
 	@Override
@@ -68,16 +111,19 @@ public class WebBrowserFragment extends MainActivityFragment implements OverlayM
 
 	public void loadUrl(String url) {
 		if (Uri.parse(url).getScheme() == null) {
-			url = "http://" + url;
+			url = getSearchUrl() + url;
 		}
 
 		FermataWebView v = getWebView();
 
 		if (v != null) {
-			if (!(this instanceof YoutubeFragment) && isYoutubeUri(Uri.parse(url))) {
-				MainActivityDelegate a = MainActivityDelegate.get(getContext());
-				YoutubeFragment f = a.showFragment(me.aap.fermata.R.id.youtube_fragment);
-				f.loadUrl(url);
+			if (!(this instanceof YoutubeFragment) && isYoutubeUri(Uri.parse(url)) &&
+					AddonManager.get().hasAddon(me.aap.fermata.R.id.youtube_fragment)) {
+				String u = url;
+				MainActivityDelegate.getActivityDelegate(requireContext()).onSuccess(a -> {
+					YoutubeFragment f = a.showFragment(me.aap.fermata.R.id.youtube_fragment);
+					f.loadUrl(u);
+				});
 			} else {
 				v.loadUrl(url);
 			}
@@ -87,6 +133,7 @@ public class WebBrowserFragment extends MainActivityFragment implements OverlayM
 		}
 	}
 
+	@Nullable
 	public String getUrl() {
 		WebView v = getWebView();
 		return (v == null) ? null : v.getUrl();
@@ -136,14 +183,21 @@ public class WebBrowserFragment extends MainActivityFragment implements OverlayM
 
 	@Override
 	public void contributeToNavBarMenu(OverlayMenu.Builder b) {
+		WebBrowserAddon a = getAddon();
 		FermataWebView v = getWebView();
-		if (v == null) return;
+		if ((a == null) || (v == null)) return;
 
-		b.addItem(me.aap.fermata.R.id.refresh, me.aap.fermata.R.drawable.refresh,
-				me.aap.fermata.R.string.refresh).setHandler(this);
+		Context ctx = dynCtx(requireContext());
+		Resources res = ctx.getResources();
+		Resources.Theme theme = ctx.getTheme();
+		b.addItem(me.aap.fermata.R.id.refresh,
+				ResourcesCompat.getDrawable(res, me.aap.fermata.R.drawable.refresh, theme),
+				res.getString(me.aap.fermata.R.string.refresh)).setHandler(this);
 
-		if (v.canGoForward()) {
-			b.addItem(R.id.browser_forward, R.drawable.forward, R.string.go_forward).setHandler(this);
+		if (isDesktopVersionSupported()) {
+			b.addItem(R.id.desktop_version,
+					ResourcesCompat.getDrawable(res, R.drawable.desktop, theme),
+					res.getString(R.string.desktop_version)).setChecked(a.isDesktopVersion()).setHandler(this);
 		}
 
 		FermataChromeClient chrome = v.getWebChromeClient();
@@ -151,14 +205,23 @@ public class WebBrowserFragment extends MainActivityFragment implements OverlayM
 
 		if (!chrome.isFullScreen()) {
 			if (chrome.canEnterFullScreen()) {
-				b.addItem(R.id.fullscreen, R.drawable.fullscreen, R.string.full_screen).setHandler(this);
+				b.addItem(R.id.fullscreen,
+						ResourcesCompat.getDrawable(res, R.drawable.fullscreen, theme),
+						res.getString(R.string.full_screen)).setHandler(this);
 			}
 		} else {
-			b.addItem(R.id.fullscreen_exit, R.drawable.fullscreen_exit, R.string.full_screen_exit).setHandler(this);
+			b.addItem(R.id.fullscreen_exit,
+					ResourcesCompat.getDrawable(res, R.drawable.fullscreen_exit, theme),
+					res.getString(R.string.full_screen_exit)).setHandler(this);
 		}
 
-		b.addItem(me.aap.fermata.R.id.bookmarks, me.aap.fermata.R.drawable.bookmark_filled,
-				me.aap.fermata.R.string.bookmarks).setSubmenu(this::bookmarksMenu);
+		b.addItem(me.aap.fermata.R.id.bookmarks,
+				ResourcesCompat.getDrawable(res, me.aap.fermata.R.drawable.bookmark_filled, theme),
+				res.getText(me.aap.fermata.R.string.bookmarks)).setSubmenu(this::bookmarksMenu);
+	}
+
+	protected boolean isDesktopVersionSupported() {
+		return true;
 	}
 
 	@Override
@@ -168,26 +231,25 @@ public class WebBrowserFragment extends MainActivityFragment implements OverlayM
 
 		int id = item.getItemId();
 
-		switch (id) {
-			case me.aap.fermata.R.id.refresh:
-				v.reload();
-				return true;
-			case R.id.browser_forward:
-				v.goForward();
-				return true;
-			case R.id.fullscreen:
-			case R.id.fullscreen_exit:
-				FermataChromeClient chrome = v.getWebChromeClient();
-				if (chrome == null) return false;
-				if (id == R.id.fullscreen) chrome.enterFullScreen();
-				else chrome.exitFullScreen();
-				return true;
+		if (id == me.aap.fermata.R.id.refresh) {
+			v.reload();
+			return true;
+		} else if (id == R.id.desktop_version) {
+			WebBrowserAddon addon = getAddon();
+			if (addon != null) addon.setDesktopVersion(!addon.isDesktopVersion());
+			return true;
+		} else if (id == R.id.fullscreen || id == R.id.fullscreen_exit) {
+			FermataChromeClient chrome = v.getWebChromeClient();
+			if (chrome == null) return false;
+			if (id == R.id.fullscreen) chrome.enterFullScreen();
+			else chrome.exitFullScreen();
+			return true;
 		}
 
 		return false;
 	}
 
-	private void bookmarksMenu(OverlayMenu.Builder b) {
+	public void bookmarksMenu(OverlayMenu.Builder b) {
 		WebBrowserAddon a = getAddon();
 		if (a == null) return;
 
@@ -241,5 +303,38 @@ public class WebBrowserFragment extends MainActivityFragment implements OverlayM
 		}
 
 		return true;
+	}
+
+	@Override
+	public boolean isVoiceCommandsSupported() {
+		return true;
+	}
+
+	@Override
+	public void voiceCommand(VoiceCommand cmd) {
+		String q = cmd.getQuery();
+
+		if (cmd.isOpen()) {
+			WebBrowserAddon a = getAddon();
+			if (a != null) {
+				for (Map.Entry<String, String> e : a.getBookmarks().entrySet()) {
+					if (q.equalsIgnoreCase(e.getValue())) {
+						loadUrl(e.getKey());
+						return;
+					}
+				}
+			}
+		}
+
+		try {
+			String u = getSearchUrl() + URLEncoder.encode(q, "UTF-8");
+			loadUrl(u);
+		} catch (UnsupportedEncodingException ex) {
+			Log.e(ex, "Failed to encode query ", q);
+		}
+	}
+
+	protected String getSearchUrl() {
+		return "https://www.google.com/search?q=";
 	}
 }

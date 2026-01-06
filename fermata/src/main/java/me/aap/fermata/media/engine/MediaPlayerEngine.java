@@ -1,19 +1,23 @@
 package me.aap.fermata.media.engine;
 
+import static android.content.ContentResolver.SCHEME_CONTENT;
+import static me.aap.utils.async.Completed.completed;
+
 import android.content.Context;
 import android.media.AudioAttributes;
 import android.media.MediaPlayer;
 import android.media.PlaybackParams;
+import android.net.Uri;
 
 import androidx.annotation.NonNull;
+
+import java.util.Collections;
 
 import me.aap.fermata.media.lib.MediaLib.PlayableItem;
 import me.aap.fermata.media.pref.MediaPrefs;
 import me.aap.fermata.ui.view.VideoView;
 import me.aap.utils.async.FutureSupplier;
 import me.aap.utils.log.Log;
-
-import static me.aap.utils.async.Completed.completed;
 
 /**
  * @author Andrey Pavlenko
@@ -52,10 +56,23 @@ public class MediaPlayerEngine implements MediaEngine,
 	@Override
 	public void prepare(PlayableItem source) {
 		this.source = source;
+		Uri u = source.getLocation();
 
 		try {
 			player.reset();
-			player.setDataSource(ctx, source.getLocation());
+			String scheme = u.getScheme();
+			if (SCHEME_CONTENT.equals(scheme)) {
+				player.setDataSource(ctx, u);
+			} else if ((scheme != null) && scheme.startsWith("http")) {
+				String agent = source.getUserAgent();
+				if (agent != null) {
+					player.setDataSource(ctx, u, Collections.singletonMap("User-Agent", agent));
+				} else {
+					player.setDataSource(u.toString());
+				}
+			} else {
+				player.setDataSource(ctx, u);
+			}
 			player.prepareAsync();
 		} catch (Exception ex) {
 			listener.onEngineError(this, ex);
@@ -88,7 +105,7 @@ public class MediaPlayerEngine implements MediaEngine,
 
 	@Override
 	public FutureSupplier<Long> getDuration() {
-		return completed((source == null) || source.isStream() ? 0L : player.getDuration());
+		return completed((source == null) || !source.isSeekable() ? 0L : player.getDuration());
 	}
 
 	@Override
@@ -161,6 +178,9 @@ public class MediaPlayerEngine implements MediaEngine,
 
 	@Override
 	public void onPrepared(MediaPlayer mp) {
+		if (source == null) return;
+		long off = source.getOffset();
+		if (off > 0) player.seekTo((int) off);
 		listener.onEnginePrepared(this);
 	}
 

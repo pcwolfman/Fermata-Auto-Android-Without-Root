@@ -1,5 +1,22 @@
 package me.aap.fermata.ui.view;
 
+import static android.view.KeyEvent.KEYCODE_DPAD_CENTER;
+import static android.view.KeyEvent.KEYCODE_DPAD_DOWN;
+import static android.view.KeyEvent.KEYCODE_DPAD_LEFT;
+import static android.view.KeyEvent.KEYCODE_DPAD_RIGHT;
+import static android.view.KeyEvent.KEYCODE_DPAD_UP;
+import static android.view.KeyEvent.KEYCODE_ENTER;
+import static android.view.ViewGroup.LayoutParams.MATCH_PARENT;
+import static android.view.ViewGroup.LayoutParams.WRAP_CONTENT;
+import static me.aap.fermata.media.lib.MediaLib.PlayableItem;
+import static me.aap.fermata.media.pref.MediaPrefs.SCALE_16_9;
+import static me.aap.fermata.media.pref.MediaPrefs.SCALE_4_3;
+import static me.aap.fermata.media.pref.MediaPrefs.SCALE_BEST;
+import static me.aap.fermata.media.pref.MediaPrefs.SCALE_FILL;
+import static me.aap.fermata.media.pref.MediaPrefs.SCALE_ORIGINAL;
+import static me.aap.utils.ui.UiUtils.isVisible;
+import static me.aap.utils.ui.UiUtils.toIntPx;
+
 import android.annotation.SuppressLint;
 import android.content.Context;
 import android.graphics.Color;
@@ -7,15 +24,17 @@ import android.graphics.PixelFormat;
 import android.util.AttributeSet;
 import android.view.Gravity;
 import android.view.KeyEvent;
+import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
-import android.widget.TextView;
+import android.widget.TextClock;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 
 import com.google.android.material.circularreveal.CircularRevealFrameLayout;
 
@@ -26,35 +45,43 @@ import java.util.List;
 import java.util.Set;
 
 import me.aap.fermata.FermataApplication;
+import me.aap.fermata.R;
 import me.aap.fermata.media.engine.MediaEngine;
 import me.aap.fermata.media.pref.MediaPrefs;
 import me.aap.fermata.media.service.FermataServiceUiBinder;
 import me.aap.fermata.media.service.MediaSessionCallback;
 import me.aap.fermata.ui.activity.MainActivityDelegate;
+import me.aap.fermata.ui.activity.MainActivityListener;
+import me.aap.fermata.ui.activity.MainActivityPrefs;
+import me.aap.utils.async.FutureSupplier;
 import me.aap.utils.pref.PreferenceStore;
-
-import static android.view.ViewGroup.LayoutParams.MATCH_PARENT;
-import static me.aap.fermata.media.lib.MediaLib.PlayableItem;
-import static me.aap.fermata.media.pref.MediaPrefs.SCALE_16_9;
-import static me.aap.fermata.media.pref.MediaPrefs.SCALE_4_3;
-import static me.aap.fermata.media.pref.MediaPrefs.SCALE_BEST;
-import static me.aap.fermata.media.pref.MediaPrefs.SCALE_FILL;
-import static me.aap.fermata.media.pref.MediaPrefs.SCALE_ORIGINAL;
-import static me.aap.utils.ui.UiUtils.toPx;
+import me.aap.utils.ui.view.NavBarView;
 
 /**
  * @author Andrey Pavlenko
  */
 public class VideoView extends FrameLayout implements SurfaceHolder.Callback,
-		View.OnLayoutChangeListener, PreferenceStore.Listener {
+		View.OnLayoutChangeListener, PreferenceStore.Listener, MainActivityListener {
 	private final Set<PreferenceStore.Pref<?>> prefChange = new HashSet<>(Arrays.asList(
 			MediaPrefs.VIDEO_SCALE, MediaPrefs.AUDIO_DELAY, MediaPrefs.SUB_DELAY
 	));
 	private boolean surfaceCreated;
-	private boolean prefListenerRegistered;
 
 	public VideoView(Context context) {
-		super(context, null);
+		this(context, null);
+	}
+
+	public VideoView(Context context, AttributeSet attrs) {
+		super(context, attrs);
+		init(context);
+		getActivity().onSuccess(a -> {
+			a.addBroadcastListener(this);
+			a.getLib().getPrefs().addBroadcastListener(this);
+			setClockPos(a.getPrefs().getClockPosPref());
+		});
+	}
+
+	protected void init(Context context) {
 		setBackgroundColor(Color.BLACK);
 		addView(new SurfaceView(getContext()) {
 			{
@@ -64,59 +91,87 @@ public class VideoView extends FrameLayout implements SurfaceHolder.Callback,
 				getHolder().addCallback(VideoView.this);
 			}
 		});
+		addView(new SurfaceView(getContext()) {
+			{
+				FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT);
+				lp.gravity = Gravity.CENTER_HORIZONTAL | Gravity.BOTTOM;
+				setLayoutParams(lp);
+				setZOrderMediaOverlay(true);
+				getHolder().setFormat(PixelFormat.TRANSLUCENT);
+				getHolder().addCallback(VideoView.this);
+			}
+		});
 
-		addTitle(context);
-		setLayoutParams(new CircularRevealFrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT));
-	}
-
-	public VideoView(Context context, AttributeSet attrs) { // Used by Youtube addon
-		super(context, attrs);
-		addView(new FrameLayout(context), new FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT));
-		addTitle(context);
-	}
-
-	private void addTitle(Context context) {
-		TextView text = new TextView(context);
-		int padding = (int) toPx(context, 10);
-		text.setPadding(padding, padding, padding, 0);
-		text.setTextSize(20);
-		text.setTextColor(Color.WHITE);
-		text.setVisibility(GONE);
-		addView(text);
+		addInfoView(context);
 		addOnLayoutChangeListener(this);
+		setLayoutParams(new CircularRevealFrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT));
 		setFocusable(true);
+	}
+
+	protected void addInfoView(Context context) {
+		VideInfoView d = new VideInfoView(context, null);
+		FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT);
+		lp.gravity = Gravity.CENTER_HORIZONTAL | Gravity.TOP;
+		d.setLayoutParams(lp);
+		addView(d);
 	}
 
 	public SurfaceView getVideoSurface() {
 		return (SurfaceView) getChildAt(0);
 	}
 
-	public SurfaceView getSubtitleSurface(boolean create) {
-		if (getChildCount() < 3) {
-			if (!create) return null;
-			removeViewAt(1);
-			Context ctx = getContext();
-			SurfaceView v = new SurfaceView(ctx);
-			FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT);
-			lp.gravity = Gravity.CENTER_HORIZONTAL | Gravity.BOTTOM;
-			v.setLayoutParams(lp);
-			v.setZOrderMediaOverlay(true);
-			v.getHolder().setFormat(PixelFormat.TRANSLUCENT);
-			addView(v);
-			addTitle(ctx);
-			return v;
-		}
-
+	@Nullable
+	public SurfaceView getSubtitleSurface() {
 		return (SurfaceView) getChildAt(1);
 	}
 
-	public TextView getTitle() {
-		return (TextView) getChildAt((getChildCount() < 3) ? 1 : 2);
+
+	public void setClockPos(int pos) {
+		int idx = getChildCount() - 1;
+		int gravity = Gravity.TOP;
+
+		switch (pos) {
+			case MainActivityPrefs.CLOCK_POS_NONE:
+				if (getChildAt(idx) instanceof TextClock) removeViewAt(idx);
+				return;
+			case MainActivityPrefs.CLOCK_POS_LEFT:
+				gravity |= Gravity.START;
+				break;
+			case MainActivityPrefs.CLOCK_POS_RIGHT:
+				gravity |= Gravity.END;
+				break;
+			case MainActivityPrefs.CLOCK_POS_CENTER:
+				gravity |= Gravity.CENTER;
+				break;
+		}
+
+		View clock = getChildAt(idx);
+		FrameLayout.LayoutParams lp;
+
+		if (clock instanceof TextClock) {
+			lp = (FrameLayout.LayoutParams) clock.getLayoutParams();
+		} else {
+			Context ctx = getContext();
+			int m = toIntPx(ctx, 10);
+			clock = LayoutInflater.from(ctx).inflate(R.layout.clock_view, this, false);
+			lp = new FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT);
+			lp.setMargins(m, m, m, m);
+			addView(clock);
+		}
+
+		lp.gravity = gravity;
+		clock.setLayoutParams(lp);
 	}
 
-	public void showVideo() {
+	@Nullable
+	public VideInfoView getVideoInfoView() {
+		return (VideInfoView) getChildAt(2);
+	}
+
+	public void showVideo(boolean hideTitle) {
 		if (surfaceCreated) {
-			MainActivityDelegate a = getActivity();
+			MainActivityDelegate a = getActivity().peek();
+			if (a == null) return;
 			MediaSessionCallback cb = a.getMediaSessionCallback();
 			MediaEngine eng = cb.getEngine();
 			if (eng == null) return;
@@ -127,18 +182,8 @@ public class VideoView extends FrameLayout implements SurfaceHolder.Callback,
 			setSurfaceSize(eng);
 			cb.addVideoView(this, a.isCarActivity() ? 0 : 1);
 
-			TextView title = getTitle();
-			title.setVisibility(GONE);
-
-			i.getMediaDescription().main().onSuccess(dsc -> {
-				if (cb.getCurrentItem() != i) return;
-				title.setText(dsc.getTitle());
-			});
-
-			if (!prefListenerRegistered) {
-				i.getLib().getPrefs().addBroadcastListener(this);
-				prefListenerRegistered = true;
-			}
+			VideInfoView info = getVideoInfoView();
+			if (hideTitle && (info != null)) info.setVisibility(GONE);
 		}
 	}
 
@@ -201,7 +246,7 @@ public class VideoView extends FrameLayout implements SurfaceHolder.Callback,
 			surface.setLayoutParams(lp);
 		}
 
-		if ((surface = getSubtitleSurface(false)) != null) {
+		if ((surface = getSubtitleSurface()) != null) {
 			lp = surface.getLayoutParams();
 
 			if ((lp.width != width) || (lp.height != height)) {
@@ -218,7 +263,9 @@ public class VideoView extends FrameLayout implements SurfaceHolder.Callback,
 		FermataApplication.get().getHandler().post(() -> {
 			if (!surfaceCreated) return;
 
-			MediaEngine eng = getActivity().getMediaServiceBinder().getCurrentEngine();
+			MainActivityDelegate a = getActivity().peek();
+			if (a == null) return;
+			MediaEngine eng = a.getMediaServiceBinder().getCurrentEngine();
 			if (eng == null) return;
 
 			PlayableItem i = eng.getSource();
@@ -227,51 +274,83 @@ public class VideoView extends FrameLayout implements SurfaceHolder.Callback,
 	}
 
 	@Override
-	public void surfaceCreated(SurfaceHolder holder) {
+	public void surfaceCreated(@NonNull SurfaceHolder holder) {
+		if (!getVideoSurface().getHolder().getSurface().isValid()) return;
+		SurfaceView s = getSubtitleSurface();
+		if ((s != null) && !s.getHolder().getSurface().isValid()) return;
 		surfaceCreated = true;
-		showVideo();
+		showVideo(true);
 	}
 
 	@Override
-	public void surfaceDestroyed(SurfaceHolder holder) {
+	public void surfaceDestroyed(@NonNull SurfaceHolder holder) {
 		surfaceCreated = false;
-		MainActivityDelegate a = getActivity();
-		if (a != null) {
-			FermataServiceUiBinder b = a.getMediaServiceBinder();
-			if (b != null) {
-				b.getMediaSessionCallback().removeVideoView(this);
-			}
-		}
+		getActivity().onSuccess(a -> a.getMediaSessionCallback().removeVideoView(this));
 	}
 
 	@Override
-	public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+	public void surfaceChanged(@NonNull SurfaceHolder holder, int format, int width, int height) {
 	}
 
 	@SuppressLint("ClickableViewAccessibility")
 	@Override
 	public boolean onTouchEvent(@NonNull MotionEvent e) {
-		return getActivity().interceptTouchEvent(e, this::onTouch);
+		MainActivityDelegate a = getActivity().peek();
+		return (a != null) && a.interceptTouchEvent(e, this::onTouch);
 	}
 
 	@Override
 	public boolean onKeyDown(int keyCode, KeyEvent event) {
 		MainActivityDelegate a;
 		FermataServiceUiBinder b;
+		ControlPanelView p;
 
 		switch (keyCode) {
-			case KeyEvent.KEYCODE_DPAD_LEFT:
-			case KeyEvent.KEYCODE_DPAD_RIGHT:
-				a = getActivity();
+			case KEYCODE_ENTER:
+			case KEYCODE_DPAD_CENTER:
+				if ((a = getActivity().peek()) == null) break;
+				return a.getControlPanel().onTouch(this);
+			case KEYCODE_DPAD_LEFT:
+			case KEYCODE_DPAD_RIGHT:
+				if ((a = getActivity().peek()) == null) break;
+				p = a.getControlPanel();
+
+				if (!p.isVideoSeekMode() && !a.getBody().isVideoMode()) {
+					View v = focusSearch(this, (keyCode == KEYCODE_DPAD_LEFT) ? FOCUS_LEFT : FOCUS_RIGHT);
+					if (v != null) {
+						v.requestFocus();
+						return true;
+					} else {
+						break;
+					}
+				}
+
 				b = a.getMediaServiceBinder();
-				b.onRwFfButtonClick(keyCode == KeyEvent.KEYCODE_DPAD_RIGHT);
+				b.onRwFfButtonClick(keyCode == KEYCODE_DPAD_RIGHT);
 				a.getControlPanel().onVideoSeek();
 				return true;
-			case KeyEvent.KEYCODE_DPAD_UP:
-			case KeyEvent.KEYCODE_DPAD_DOWN:
-				a = getActivity();
+			case KEYCODE_DPAD_UP:
+				if ((a = getActivity().peek()) == null) break;
 				b = a.getMediaServiceBinder();
-				b.onRwFfButtonLongClick(keyCode == KeyEvent.KEYCODE_DPAD_UP);
+				b.onRwFfButtonLongClick(true);
+				a.getControlPanel().onVideoSeek();
+				return true;
+			case KEYCODE_DPAD_DOWN:
+				if ((a = getActivity().peek()) == null) break;
+				p = a.getControlPanel();
+
+				if (!p.isVideoSeekMode() && isVisible(p)) {
+					View v = p.focusSearch();
+					if (v != null) {
+						v.requestFocus();
+						return true;
+					} else {
+						break;
+					}
+				}
+
+				b = a.getMediaServiceBinder();
+				b.onRwFfButtonLongClick(false);
 				a.getControlPanel().onVideoSeek();
 				return true;
 		}
@@ -280,14 +359,18 @@ public class VideoView extends FrameLayout implements SurfaceHolder.Callback,
 	}
 
 	private boolean onTouch(@NonNull MotionEvent e) {
-		getActivity().getControlPanel().onVideoViewTouch(this, e);
+		MainActivityDelegate a = getActivity().peek();
+		if (a == null) return false;
+		a.getControlPanel().onVideoViewTouch(this, e);
 		return true;
 	}
 
 	@Override
 	public void onPreferenceChanged(PreferenceStore store, List<PreferenceStore.Pref<?>> prefs) {
-		if (!Collections.disjoint(prefChange, prefs)) {
-			MediaEngine eng = getActivity().getMediaSessionCallback().getEngine();
+		if (surfaceCreated && !Collections.disjoint(prefChange, prefs)) {
+			MainActivityDelegate a = getActivity().peek();
+			if (a == null) return;
+			MediaEngine eng = a.getMediaSessionCallback().getEngine();
 			if (eng == null) return;
 			PlayableItem i = eng.getSource();
 			if ((i == null) || !i.isVideo()) return;
@@ -302,7 +385,30 @@ public class VideoView extends FrameLayout implements SurfaceHolder.Callback,
 		}
 	}
 
-	private MainActivityDelegate getActivity() {
-		return MainActivityDelegate.get(getContext());
+	@Override
+	public void onActivityEvent(MainActivityDelegate a, long e) {
+		if (handleActivityDestroyEvent(a, e)) {
+			a.getMediaSessionCallback().removeVideoView(this);
+			a.getLib().getPrefs().removeBroadcastListener(this);
+		}
+	}
+
+	@Override
+	public View focusSearch(View focused, int direction) {
+		MainActivityDelegate a = getActivity().peek();
+		if ((a == null) || !a.getBody().isBothMode()) return focused;
+
+		if (direction == FOCUS_LEFT) {
+			return MediaItemListView.focusSearchActive(getContext(), focused);
+		} else if (direction == FOCUS_RIGHT) {
+			NavBarView n = a.getNavBar();
+			if (n.isRight()) return n.focusSearch();
+		}
+
+		return focused;
+	}
+
+	private FutureSupplier<MainActivityDelegate> getActivity() {
+		return MainActivityDelegate.getActivityDelegate(getContext());
 	}
 }

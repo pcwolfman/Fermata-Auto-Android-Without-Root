@@ -1,13 +1,20 @@
 package me.aap.fermata.auto;
 
+import static me.aap.utils.async.Completed.completed;
+import static me.aap.utils.async.Completed.failed;
+import static me.aap.utils.ui.UiUtils.showAlert;
+
 import android.content.Context;
 import android.content.Intent;
+import android.content.res.Configuration;
 import android.os.Bundle;
+import android.os.OperationCanceledException;
 import android.text.TextWatcher;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.Window;
 import android.widget.EditText;
+import android.widget.TextView.OnEditorActionListener;
 
 import androidx.annotation.NonNull;
 import androidx.fragment.app.FragmentManager;
@@ -15,59 +22,87 @@ import androidx.fragment.app.FragmentManager;
 import com.google.android.apps.auto.sdk.CarActivity;
 import com.google.android.apps.auto.sdk.CarUiController;
 
-import me.aap.fermata.R;
-import me.aap.fermata.media.service.FermataServiceUiBinder;
+import me.aap.fermata.media.service.FermataMediaServiceConnection;
 import me.aap.fermata.ui.activity.FermataActivity;
 import me.aap.fermata.ui.activity.MainActivityDelegate;
 import me.aap.utils.async.FutureSupplier;
-import me.aap.utils.ui.UiUtils;
+import me.aap.utils.function.Supplier;
+import me.aap.utils.log.Log;
 import me.aap.utils.ui.activity.ActivityDelegate;
-
-import static me.aap.utils.async.Completed.failed;
 
 /**
  * @author Andrey Pavlenko
  */
 public class MainCarActivity extends CarActivity implements FermataActivity {
-	private static MainActivityDelegate delegate;
+	static FermataMediaServiceConnection service;
+	@SuppressWarnings("unchecked")
+	@NonNull
+	private FutureSupplier<MainActivityDelegate> delegate = (FutureSupplier<MainActivityDelegate>) NO_DELEGATE;
 	private CarEditText editText;
+	private TextWatcher textWatcher;
 
-	static {
-		ActivityDelegate.setContextToDelegate(c -> delegate);
-	}
-
+	@NonNull
 	@Override
-	public MainActivityDelegate getActivityDelegate() {
+	public FutureSupplier<MainActivityDelegate> getActivityDelegate() {
 		return delegate;
 	}
 
 	@Override
-	public void onCreate(Bundle savedInstanceState) {
-		super.onCreate(savedInstanceState);
-		delegate = ActivityDelegate.create(MainActivityDelegate::new, this);
-		delegate.onActivityCreate(savedInstanceState);
+	protected void attachBaseContext(Context base) {
+		MainActivityDelegate.attachBaseContext(base);
+		super.attachBaseContext(base);
+	}
 
+	@Override
+	public void onCreate(Bundle savedInstanceState) {
+		MainActivityDelegate.setTheme(this);
+		super.onCreate(savedInstanceState);
+		setIgnoreConfigChanges(0xFFFFFFFF);
 		CarUiController ctrl = getCarUiController();
 		ctrl.getStatusBarController().hideAppHeader();
 		ctrl.getMenuController().hideMenuButton();
+		FermataMediaServiceConnection s = service;
+
+		if ((s != null) && s.isConnected()) {
+			onCreate(savedInstanceState, s);
+		} else {
+			delegate = FermataMediaServiceConnection.connect(this, true).main()
+					.onFailure(err -> showAlert(getContext(), String.valueOf(err)))
+					.map(c -> {
+						service = c;
+						return onCreate(savedInstanceState, c);
+					});
+		}
+	}
+
+	private MainActivityDelegate onCreate(Bundle state, FermataMediaServiceConnection s) {
+		MainActivityDelegate d = new MainActivityDelegate(this, s.createBinder());
+		ActivityDelegate.setContextToDelegate(ctx -> d);
+		delegate = completed(d);
+		d.onActivityCreate(state);
+		return d;
 	}
 
 	@Override
 	public void onResume() {
 		super.onResume();
-		getActivityDelegate().onActivityResume();
+		getActivityDelegate().onSuccess(MainActivityDelegate::onActivityResume);
 	}
 
 	@Override
+	@SuppressWarnings("unchecked")
 	public void onDestroy() {
-		MainActivityDelegate a = getActivityDelegate();
-
-		if (a != null) {
-			FermataServiceUiBinder b = a.getMediaServiceBinder();
-			if (b != null) b.getMediaSessionCallback().onPause();
-		}
-
 		super.onDestroy();
+		getActivityDelegate()
+				.onSuccess(MainActivityDelegate::onActivityDestroy)
+				.thenRun(() -> ActivityDelegate.setContextToDelegate(null));
+		delegate = (FutureSupplier<MainActivityDelegate>) NO_DELEGATE;
+	}
+
+	@Override
+	public void onConfigurationChanged(Configuration configuration) {
+		Log.i("Configuration changed: ", configuration);
+		super.onConfigurationChanged(configuration);
 	}
 
 	@Override
@@ -91,17 +126,19 @@ public class MainCarActivity extends CarActivity implements FermataActivity {
 		return true;
 	}
 
+	@Override
+	public void setRequestedOrientation(int requestedOrientation) {
+	}
 
 	public void recreate() {
-		UiUtils.showAlert(getContext(), R.string.please_restart_app);
 	}
 
 	public void finish() {
-		getActivityDelegate().onActivityFinish();
+		getActivityDelegate().onSuccess(MainActivityDelegate::onActivityFinish);
 	}
 
 	@Override
-	public FutureSupplier<Intent> startActivityForResult(Intent intent) {
+	public FutureSupplier<Intent> startActivityForResult(Supplier<Intent> intent) {
 		return failed(new UnsupportedOperationException());
 	}
 
@@ -114,19 +151,44 @@ public class MainCarActivity extends CarActivity implements FermataActivity {
 		return c();
 	}
 
+	@Override
 	public EditText startInput(TextWatcher w) {
 		if (editText == null) editText = new CarEditText(this);
+		if (textWatcher != null) editText.removeTextChangedListener(textWatcher);
 		editText.addTextChangedListener(w);
-		a().startInput(editText);
+		textWatcher = w;
+		getActivityDelegate().onSuccess(a -> {
+			if (a.getPrefs().getVoiceControlEnabledPref()) {
+				a.startSpeechRecognizer(true).onCompletion((q, err) -> {
+					stopInput();
+					if (err instanceof OperationCanceledException) {
+						textWatcher = w;
+						editText.removeTextChangedListener(w);
+						editText.addTextChangedListener(w);
+						if (w instanceof OnEditorActionListener)
+							editText.setOnEditorActionListener((OnEditorActionListener) w);
+						a().startInput(editText);
+					} else if ((q != null) && !q.isEmpty()) {
+						editText.setText(q.get(0));
+						w.afterTextChanged(editText.getText());
+					} else {
+						stopInput();
+					}
+				});
+			} else {
+				a().startInput(editText);
+			}
+		});
 		return editText;
 	}
 
-	public void stopInput(TextWatcher w) {
+	public void stopInput() {
 		if (editText != null) {
-			editText.removeTextChangedListener(w);
+			if (textWatcher != null) editText.removeTextChangedListener(textWatcher);
 			editText.setOnEditorActionListener(null);
-			a().stopInput();
 		}
+
+		a().stopInput();
 	}
 
 	public boolean isInputActive() {
@@ -142,20 +204,31 @@ public class MainCarActivity extends CarActivity implements FermataActivity {
 	}
 
 	@Override
+	public boolean setTextInput(String text) {
+		if ((editText == null) || !isInputActive()) return false;
+		editText.setText(text);
+		stopInput();
+		return true;
+	}
+
+	@Override
 	public boolean onKeyUp(int keyCode, KeyEvent keyEvent) {
-		return (delegate != null) ? delegate.onKeyUp(keyCode, keyEvent, super::onKeyUp)
+		MainActivityDelegate d = delegate.peek();
+		return (d != null) ? d.onKeyUp(keyCode, keyEvent, super::onKeyUp)
 				: super.onKeyUp(keyCode, keyEvent);
 	}
 
 	@Override
 	public boolean onKeyDown(int keyCode, KeyEvent keyEvent) {
-		return (delegate != null) ? delegate.onKeyDown(keyCode, keyEvent, super::onKeyDown)
+		MainActivityDelegate d = delegate.peek();
+		return (d != null) ? d.onKeyDown(keyCode, keyEvent, super::onKeyDown)
 				: super.onKeyDown(keyCode, keyEvent);
 	}
 
 	@Override
 	public boolean onKeyLongPress(int keyCode, KeyEvent keyEvent) {
-		return (delegate != null) ? delegate.onKeyLongPress(keyCode, keyEvent, super::onKeyLongPress)
+		MainActivityDelegate d = delegate.peek();
+		return (d != null) ? d.onKeyLongPress(keyCode, keyEvent, super::onKeyLongPress)
 				: super.onKeyLongPress(keyCode, keyEvent);
 	}
 }
