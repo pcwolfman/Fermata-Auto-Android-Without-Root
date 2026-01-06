@@ -6,8 +6,10 @@
 .classpath
 build/
 dist/
+.cxx/
 depends/ffmpeg/
 *.iml
 local.properties
 google-services.json
 TODO
+res/*.jks

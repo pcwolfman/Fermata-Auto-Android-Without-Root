@@ -1,12 +1,15 @@
 package me.aap.fermata.media.service;
 
-import android.content.ComponentName;
-import android.content.Context;
-import android.content.Intent;
-import android.content.ServiceConnection;
+import static android.support.v4.media.session.PlaybackStateCompat.STATE_PLAYING;
+import static android.view.View.GONE;
+import static android.view.View.INVISIBLE;
+import static android.view.View.VISIBLE;
+import static me.aap.fermata.media.lib.MediaLib.StreamItem.STREAM_END_TIME;
+import static me.aap.fermata.media.lib.MediaLib.StreamItem.STREAM_START_TIME;
+
+import android.os.Bundle;
 import android.os.Handler;
-import android.os.IBinder;
-import android.os.RemoteException;
+import android.os.SystemClock;
 import android.support.v4.media.session.MediaControllerCompat;
 import android.support.v4.media.session.MediaSessionCompat;
 import android.support.v4.media.session.PlaybackStateCompat;
@@ -14,7 +17,6 @@ import android.view.View;
 import android.widget.SeekBar;
 import android.widget.SeekBar.OnSeekBarChangeListener;
 import android.widget.TextView;
-import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -25,35 +27,24 @@ import me.aap.fermata.FermataApplication;
 import me.aap.fermata.media.engine.MediaEngine;
 import me.aap.fermata.media.lib.MediaLib;
 import me.aap.fermata.media.lib.MediaLib.PlayableItem;
+import me.aap.fermata.media.lib.MediaLib.StreamItem;
 import me.aap.fermata.media.pref.PlaybackControlPrefs;
-import me.aap.fermata.media.service.FermataMediaService.ServiceBinder;
+import me.aap.utils.app.App;
 import me.aap.utils.async.FutureSupplier;
 import me.aap.utils.event.BasicEventBroadcaster;
-import me.aap.utils.function.BiConsumer;
 import me.aap.utils.log.Log;
 import me.aap.utils.text.TextUtils;
-
-import static android.support.v4.media.session.PlaybackStateCompat.STATE_PLAYING;
-import static android.view.View.GONE;
-import static android.view.View.INVISIBLE;
-import static android.view.View.VISIBLE;
-import static java.util.Objects.requireNonNull;
-import static me.aap.fermata.media.service.FermataMediaService.ACTION_CAR_MEDIA_SERVICE;
-import static me.aap.fermata.media.service.FermataMediaService.ACTION_MEDIA_SERVICE;
-import static me.aap.fermata.media.service.FermataMediaService.INTENT_ATTR_NOTIF_COLOR;
 
 /**
  * @author Andrey Pavlenko
  */
 public class FermataServiceUiBinder extends BasicEventBroadcaster<FermataServiceUiBinder.Listener>
-		implements ServiceConnection, OnSeekBarChangeListener {
-	private final Context ctx;
+		implements OnSeekBarChangeListener {
+	private final MediaSessionCallback sessionCallback;
+	private final MediaControllerCallback callback;
+	private final MediaControllerCompat mediaController;
 	private PlayableItem currentItem;
-	private BiConsumer<FermataServiceUiBinder, Throwable> resultHandler;
 	private boolean bound;
-	private MediaSessionCallback sessionCallback;
-	private MediaControllerCallback callback;
-	private MediaControllerCompat mediaController;
 	@Nullable
 	private View playPauseButton;
 	@Nullable
@@ -72,22 +63,14 @@ public class FermataServiceUiBinder extends BasicEventBroadcaster<FermataService
 	private TextView progressTotal;
 	@Nullable
 	private View controlPanel;
+	private long playPauseTime;
 
-	private FermataServiceUiBinder(@NonNull Context ctx, @NonNull BiConsumer<FermataServiceUiBinder, Throwable> resultHandler) {
-		this.ctx = ctx;
-		this.resultHandler = resultHandler;
-	}
-
-	public static void bind(@NonNull Context ctx, int notifColor, boolean isAuto,
-													@NonNull BiConsumer<FermataServiceUiBinder, Throwable> resultHandler) {
-		FermataServiceUiBinder con = new FermataServiceUiBinder(ctx, resultHandler);
-		Intent i = new Intent(ctx, FermataMediaService.class);
-		i.setAction(isAuto ? ACTION_CAR_MEDIA_SERVICE : ACTION_MEDIA_SERVICE);
-		i.putExtra(INTENT_ATTR_NOTIF_COLOR, notifColor);
-
-		if (!ctx.bindService(i, con, Context.BIND_AUTO_CREATE)) {
-			resultHandler.accept(null, new IllegalStateException("Failed to bind to FermataMediaService"));
-		}
+	FermataServiceUiBinder(FermataMediaServiceConnection c) {
+		sessionCallback = c.getMediaSessionCallback();
+		MediaSessionCompat session = sessionCallback.getSession();
+		mediaController = new MediaControllerCompat(App.get(),
+				session.getSessionToken());
+		callback = new MediaControllerCallback();
 	}
 
 	@NonNull
@@ -129,6 +112,10 @@ public class FermataServiceUiBinder extends BasicEventBroadcaster<FermataService
 		}
 	}
 
+	public void stop() {
+		mediaController.getTransportControls().stop();
+	}
+
 	public void bindPlayPauseButton(View v) {
 		playPauseButton = v;
 		v.setOnClickListener(b -> onPlayPauseButtonClick());
@@ -136,8 +123,14 @@ public class FermataServiceUiBinder extends BasicEventBroadcaster<FermataService
 	}
 
 	public void onPlayPauseButtonClick() {
-		if (isPlaying()) getMediaSessionCallback().onPause();
-		else getMediaSessionCallback().onPlay();
+		var time = SystemClock.uptimeMillis();
+		if ((time - playPauseTime) < 300) {
+			mediaController.getTransportControls().stop();
+		} else {
+			playPauseTime = time;
+			if (isPlaying()) getMediaSessionCallback().onPause();
+			else getMediaSessionCallback().onPlay();
+		}
 	}
 
 	private boolean onPlayPauseButtonLongClick(View v) {
@@ -231,7 +224,6 @@ public class FermataServiceUiBinder extends BasicEventBroadcaster<FermataService
 
 	public void bindProgressBar(SeekBar progressBar) {
 		this.progressBar = progressBar;
-		progressBar.setEnabled(false);
 		progressBar.setOnSeekBarChangeListener(this);
 	}
 
@@ -250,18 +242,27 @@ public class FermataServiceUiBinder extends BasicEventBroadcaster<FermataService
 	}
 
 	public void bound() {
+		assert !bound;
 		bound = true;
+		mediaController.registerCallback(callback);
 		callback.onPlaybackStateChanged(mediaController.getPlaybackState());
+		Log.d("UI bound");
 	}
 
 	public void unbind() {
+		assert bound;
 		bound = false;
+		callback.stopProgressUpdate();
+		mediaController.unregisterCallback(callback);
 		currentItem = null;
 		callback.stopProgressUpdate();
 		if (progressBar != null) progressBar.setOnSeekBarChangeListener(null);
 		unbindButtons(playPauseButton, prevButton, nextButton, rwButton, ffButton);
 		playPauseButton = prevButton = nextButton = rwButton = ffButton = null;
+		progressTime = progressTotal = null;
+		progressBar = null;
 		controlPanel = null;
+		Log.d("UI unbound");
 	}
 
 	private void unbindButtons(View... buttons) {
@@ -276,7 +277,7 @@ public class FermataServiceUiBinder extends BasicEventBroadcaster<FermataService
 	public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
 		if (fromUser) {
 			callback.setProgressTime(progress);
-			mediaController.getTransportControls().seekTo(progress * 1000);
+			mediaController.getTransportControls().seekTo(progress * 1000L);
 		}
 	}
 
@@ -290,48 +291,15 @@ public class FermataServiceUiBinder extends BasicEventBroadcaster<FermataService
 		callback.pauseProgressUpdate(false);
 	}
 
-	@Override
-	public void onServiceConnected(ComponentName name, IBinder service) {
-		BiConsumer<FermataServiceUiBinder, Throwable> rh = requireNonNull(resultHandler);
-
-		try {
-			ServiceBinder binder = (ServiceBinder) service;
-			sessionCallback = binder.getMediaSessionCallback();
-			MediaSessionCompat session = sessionCallback.getSession();
-			mediaController = new MediaControllerCompat(ctx, session.getSessionToken());
-			callback = new MediaControllerCallback(sessionCallback);
-			mediaController.registerCallback(callback);
-
-			resultHandler = null;
-			rh.accept(this, null);
-			callback.onPlaybackStateChanged(mediaController.getPlaybackState());
-		} catch (Exception ex) {
-			rh.accept(null, ex);
-		}
-	}
-
-	@Override
-	public void onServiceDisconnected(ComponentName name) {
-		if (isConnected()) {
-			callback.stopProgressUpdate();
-			mediaController.unregisterCallback(callback);
-		}
-	}
-
-	public boolean isConnected() {
-		return resultHandler == null;
-	}
-
 	private final class MediaControllerCallback extends MediaControllerCompat.Callback {
-		private final MediaSessionCallback sessionCallback;
 		private final Handler handler = FermataApplication.get().getHandler();
 		private final StringBuilder timeBuilder = new StringBuilder(10);
 		private Object progressUpdateStamp;
 		boolean pauseProgressUpdate;
 		boolean updateDuration;
+		FutureSupplier<Long> duration;
 
-		public MediaControllerCallback(MediaSessionCallback sessionCallback) {
-			this.sessionCallback = sessionCallback;
+		MediaControllerCallback() {
 		}
 
 		@Override
@@ -347,7 +315,8 @@ public class FermataServiceUiBinder extends BasicEventBroadcaster<FermataService
 					playPause(st);
 					break;
 				case PlaybackStateCompat.STATE_ERROR:
-					Toast.makeText(ctx, state.getErrorMessage(), Toast.LENGTH_LONG).show();
+					String err = state.getErrorMessage().toString();
+					fireBroadcastEvent(l -> l.onPlaybackError(err));
 				case PlaybackStateCompat.STATE_NONE:
 				case PlaybackStateCompat.STATE_STOPPED:
 					resetProgressBar();
@@ -400,8 +369,9 @@ public class FermataServiceUiBinder extends BasicEventBroadcaster<FermataService
 
 			if (!pauseProgressUpdate) {
 				MediaEngine eng = sessionCallback.getEngine();
+				PlayableItem src = (eng != null) ? eng.getSource() : null;
 
-				if ((eng != null) && (eng.getSource() != null)) {
+				if (src != null) {
 					eng.getPosition().main().onSuccess(position -> {
 						if (eng != sessionCallback.getEngine()) return;
 
@@ -414,12 +384,42 @@ public class FermataServiceUiBinder extends BasicEventBroadcaster<FermataService
 									if (dur > 0) {
 										updateDuration = false;
 										int max = (int) (dur / 1000);
-										PlayableItem i = eng.getSource();
-										i.setDuration(dur);
+										long last = getLib().getLastPlayedPosition(src);
+										src.setDuration(dur);
+										if (last > 0) eng.setPosition(last);
 										progressBar.setMax(max);
 										if (progressTotal != null) progressTotal.setText(timeToString(max));
-										fireBroadcastEvent(l -> l.durationChanged(i));
+										fireBroadcastEvent(l -> l.onDurationChanged(src));
 									}
+								});
+							}
+
+							if (src instanceof StreamItem) {
+								FutureSupplier<Long> dur = eng.getDuration();
+
+								if (dur != duration) {
+									duration = dur;
+									dur.onSuccess(d -> {
+										int max = (int) (d / 1000);
+										progressBar.setMax(max);
+										if (progressTotal != null) progressTotal.setText(timeToString(max));
+									});
+								}
+
+								src.getMediaDescription().onSuccess(md -> {
+									Bundle b = md.getExtras();
+									if (b != null) {
+										long start = b.getLong(STREAM_START_TIME, 0);
+										long end = b.getLong(STREAM_END_TIME, 0);
+
+										if (start < end) {
+											int second = (int) ((System.currentTimeMillis() - start) / 1000);
+											progressBar.setSecondaryProgress((second >= progressBar.getProgress()) ?
+													second : progressBar.getMax());
+											return;
+										}
+									}
+									progressBar.setSecondaryProgress(0);
 								});
 							}
 						}
@@ -444,7 +444,8 @@ public class FermataServiceUiBinder extends BasicEventBroadcaster<FermataService
 
 			if ((eng != null) && ((i = eng.getSource()) != null)) {
 				FutureSupplier<Long> getPos = eng.getPosition().main();
-				i.getDuration().main().onCompletion((dur, fail) -> {
+				duration = i.isStream() ? eng.getDuration() : i.getDuration();
+				duration.main().onCompletion((dur, fail) -> {
 					if (fail != null) {
 						Log.d(fail);
 						resetProgressBar();
@@ -467,23 +468,40 @@ public class FermataServiceUiBinder extends BasicEventBroadcaster<FermataService
 		}
 
 		private void playPause(MediaEngine eng, int st, int dur, int pos) {
-			if (progressBar != null) {
-				progressBar.setEnabled(true);
-				progressBar.setMax(dur);
-				progressBar.setProgress(pos);
-			}
-			if (progressTime != null) {
-				progressTime.setVisibility(VISIBLE);
-				progressTime.setText(timeToString(pos));
-			}
-			if (progressTotal != null) {
-				progressTotal.setVisibility(VISIBLE);
-				progressTotal.setText(timeToString(dur));
+			boolean canSeek = eng.canSeek();
+
+			if (canSeek) {
+				if (progressBar != null) {
+					progressBar.setEnabled(true);
+					progressBar.setVisibility(VISIBLE);
+					progressBar.setMax(dur);
+					progressBar.setProgress(pos);
+				}
+				if (progressTime != null) {
+					progressTime.setVisibility(VISIBLE);
+					progressTime.setText(timeToString(pos));
+				}
+				if (progressTotal != null) {
+					progressTotal.setVisibility(VISIBLE);
+					progressTotal.setText(timeToString(dur));
+				}
+				if (rwButton != null) rwButton.setVisibility(VISIBLE);
+				if (ffButton != null) ffButton.setVisibility(VISIBLE);
+			} else {
+				if (progressBar != null) {
+					progressBar.setEnabled(false);
+					progressBar.setVisibility(GONE);
+				}
+				if (progressTime != null) progressTime.setVisibility(GONE);
+				if (progressTotal != null) progressTotal.setVisibility(GONE);
+				if (rwButton != null) rwButton.setVisibility(GONE);
+				if (ffButton != null) ffButton.setVisibility(GONE);
 			}
 
 			if (st == STATE_PLAYING) {
 				updateDuration = (dur <= 0);
-				startProgressUpdate();
+				if (canSeek) startProgressUpdate();
+				else stopProgressUpdate();
 
 				if (playPauseButton != null) {
 					if (eng.canPause()) {
@@ -513,12 +531,10 @@ public class FermataServiceUiBinder extends BasicEventBroadcaster<FermataService
 		private void resetProgressBar() {
 			if (progressTime != null) progressTime.setVisibility(INVISIBLE);
 			if (progressTotal != null) progressTotal.setVisibility(INVISIBLE);
-
 			if (progressBar != null) {
 				progressBar.setProgress(0);
-				progressBar.setEnabled(false);
+				progressBar.setSecondaryProgress(0);
 			}
-
 			stopProgressUpdate();
 		}
 	}
@@ -527,7 +543,10 @@ public class FermataServiceUiBinder extends BasicEventBroadcaster<FermataService
 
 		void onPlayableChanged(PlayableItem oldItem, PlayableItem newItem);
 
-		default void durationChanged(PlayableItem i) {
+		default void onPlaybackError(String message) {
+		}
+
+		default void onDurationChanged(PlayableItem i) {
 		}
 	}
 }

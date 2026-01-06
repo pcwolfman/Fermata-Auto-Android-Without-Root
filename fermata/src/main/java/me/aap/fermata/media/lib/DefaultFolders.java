@@ -1,5 +1,12 @@
 package me.aap.fermata.media.lib;
 
+import static me.aap.fermata.vfs.m3u.M3uFileSystem.SCHEME_M3U;
+import static me.aap.utils.async.Completed.completed;
+import static me.aap.utils.async.Completed.completedNull;
+import static me.aap.utils.async.Completed.completedVoid;
+import static me.aap.utils.collection.CollectionUtils.mapToArray;
+import static me.aap.utils.security.SecurityUtils.sha1String;
+
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.net.Uri;
@@ -12,12 +19,16 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
+import me.aap.fermata.FermataApplication;
 import me.aap.fermata.R;
 import me.aap.fermata.media.lib.MediaLib.BrowsableItem;
 import me.aap.fermata.media.lib.MediaLib.Folders;
 import me.aap.fermata.media.lib.MediaLib.Item;
 import me.aap.fermata.media.pref.FoldersPrefs;
 import me.aap.fermata.vfs.FermataVfsManager;
+import me.aap.fermata.vfs.m3u.M3uFile;
+import me.aap.fermata.vfs.m3u.M3uFileSystem;
+import me.aap.fermata.vfs.m3u.M3uFileSystemProvider;
 import me.aap.utils.async.Async;
 import me.aap.utils.async.FutureSupplier;
 import me.aap.utils.collection.CollectionUtils;
@@ -26,18 +37,14 @@ import me.aap.utils.pref.PreferenceStore;
 import me.aap.utils.pref.SharedPreferenceStore;
 import me.aap.utils.resource.Rid;
 import me.aap.utils.text.SharedTextBuilder;
-
-import static me.aap.utils.async.Completed.completed;
-import static me.aap.utils.async.Completed.completedNull;
-import static me.aap.utils.async.Completed.completedVoid;
-import static me.aap.utils.collection.CollectionUtils.mapToArray;
-import static me.aap.utils.security.SecurityUtils.sha1String;
+import me.aap.utils.vfs.VirtualFile;
+import me.aap.utils.vfs.VirtualFolder;
+import me.aap.utils.vfs.VirtualResource;
 
 /**
  * @author Andrey Pavlenko
  */
-class DefaultFolders extends BrowsableItemBase implements Folders,
-		FoldersPrefs {
+class DefaultFolders extends BrowsableItemBase implements Folders, FoldersPrefs {
 	static final String ID = "Folders";
 	private final DefaultMediaLib lib;
 	private final SharedPreferenceStore foldersPrefStore;
@@ -48,7 +55,7 @@ class DefaultFolders extends BrowsableItemBase implements Folders,
 		this.lib = lib;
 		SharedPreferences prefs = lib.getContext().getSharedPreferences("folders", Context.MODE_PRIVATE);
 		foldersPrefStore = SharedPreferenceStore.create(prefs, getLib().getPrefs());
-		vfsManager = new FermataVfsManager();
+		vfsManager = FermataApplication.get().getVfsManager();
 	}
 
 	@Override
@@ -121,20 +128,32 @@ class DefaultFolders extends BrowsableItemBase implements Folders,
 		List<Item> children = new ArrayList<>(pref.length);
 		Set<String> names = new HashSet<>((int) (pref.length * 1.5));
 
-		return Async.forEach(rid -> vfsManager.getFolder(rid)
+		return Async.forEach(rid -> vfsManager.getResource(rid)
 				.ifFail(fail -> {
 					Log.e(fail, "Failed to load folder ", rid);
 					return null;
 				})
-				.then(folder -> {
-					if (folder == null) return completedVoid();
+				.then(r -> {
+					if (r == null) return completedVoid();
 
-					String name = folder.getName();
-					if (!names.add(name)) name = sha1String(rid);
+					Item i = null;
 
-					String id = SharedTextBuilder.get().append(FolderItem.SCHEME).append(':').append(name).releaseString();
-					FolderItem i = FolderItem.create(id, this, folder, lib);
-					children.add(i);
+					if (r instanceof VirtualFolder) {
+						String name = r.getName();
+						if (!names.add(name)) name = sha1String(rid);
+						String id = SharedTextBuilder.get().append(FolderItem.SCHEME).append(':').append(name).releaseString();
+						i = FolderItem.create(id, this, (VirtualFolder) r, lib);
+					} else if (r instanceof VirtualFile) {
+						Rid mrid = r.getRid();
+						if (SCHEME_M3U.equals(mrid.getScheme())) {
+							M3uFileSystem fs = M3uFileSystem.getInstance();
+							String id = SharedTextBuilder.get().append(M3uItem.SCHEME).append(':').append(fs.toId(mrid)).releaseString();
+							i = M3uItem.create(id, this, (VirtualFile) r, lib);
+						}
+					}
+
+					if (i != null) children.add(i);
+					else Log.e("Unsupported resource: ", r);
 					return completedVoid();
 				}), pref).then(v -> completed(children));
 	}
@@ -158,50 +177,62 @@ class DefaultFolders extends BrowsableItemBase implements Folders,
 	@NonNull
 	@Override
 	public FutureSupplier<Item> addItem(Uri uri) {
-		List<FolderItem> children = list();
+		return list().then(children -> {
+			if (CollectionUtils.contains(children, u -> uri.equals(u.getResource().getRid().toAndroidUri()))) {
+				return completedNull();
+			}
 
-		if (CollectionUtils.contains(children, u -> uri.equals(u.getResource().getRid().toAndroidUri()))) {
-			return completedNull();
-		}
+			List<BrowsableItem> newChildren = new ArrayList<>(children.size() + 1);
+			newChildren.addAll(children);
+			return toFolderItem(uri, newChildren).main().map(folder -> {
+				if (folder == null) return null;
 
-		List<FolderItem> newChildren = new ArrayList<>(children.size() + 1);
-		newChildren.addAll(children);
-		return toFolderItem(uri, newChildren).main().map(folder -> {
-			if (folder == null) return null;
-
-			newChildren.add(folder);
-			setNewChildren(newChildren);
-			saveChildren(newChildren);
-			return folder;
+				newChildren.add(folder);
+				setNewChildren(newChildren);
+				saveChildren(newChildren);
+				return folder;
+			});
 		});
 	}
 
 	@Override
-	public void removeItem(int idx) {
-		List<FolderItem> newChildren = new ArrayList<>(list());
-		FolderItem i = newChildren.remove(idx);
-		getLib().removeFromCache(i);
-		setNewChildren(newChildren);
-		saveChildren(newChildren);
+	public FutureSupplier<Void> removeItem(int idx) {
+		return list().map(list -> {
+			List<BrowsableItem> newChildren = new ArrayList<>(list);
+			BrowsableItem i = newChildren.remove(idx);
+			getLib().removeFromCache(i);
+			setNewChildren(newChildren);
+			saveChildren(newChildren);
+			itemRemoved(i);
+			return null;
+		});
 	}
 
 	@Override
-	public void removeItem(Item item) {
-		Rid rid = item.getResource().getRid();
-		List<FolderItem> newChildren = new ArrayList<>(list());
-		if (!CollectionUtils.remove(newChildren, u -> rid.equals(u.getResource().getRid()))) return;
+	public FutureSupplier<Void> removeItem(Item item) {
+		return list().map(list -> {
+			Rid rid = item.getResource().getRid();
+			List<BrowsableItem> newChildren = new ArrayList<>(list);
+			if (!CollectionUtils.remove(newChildren, u -> rid.equals(u.getResource().getRid())))
+				return null;
 
-		getLib().removeFromCache(item);
-		setNewChildren(newChildren);
-		saveChildren(newChildren);
+			getLib().removeFromCache(item);
+			setNewChildren(newChildren);
+			saveChildren(newChildren);
+			itemRemoved(item);
+			return null;
+		});
 	}
 
 	@Override
-	public void moveItem(int fromPosition, int toPosition) {
-		List<FolderItem> newChildren = new ArrayList<>(list());
-		CollectionUtils.move(newChildren, fromPosition, toPosition);
-		setNewChildren(newChildren);
-		saveChildren(newChildren);
+	public FutureSupplier<Void> moveItem(int fromPosition, int toPosition) {
+		return list().map(list -> {
+			List<BrowsableItem> newChildren = new ArrayList<>(list);
+			CollectionUtils.move(newChildren, fromPosition, toPosition);
+			setNewChildren(newChildren);
+			saveChildren(newChildren);
+			return null;
+		});
 	}
 
 	private void saveChildren(List<? extends Item> children) {
@@ -209,33 +240,49 @@ class DefaultFolders extends BrowsableItemBase implements Folders,
 	}
 
 	@NonNull
-	private FutureSupplier<FolderItem> toFolderItem(Uri u, List<FolderItem> children) {
-		return vfsManager.getFolder(Rid.create(u)).map(folder -> {
-			if (folder == null) return null;
+	private FutureSupplier<BrowsableItem> toFolderItem(Uri u, List<BrowsableItem> children) {
+		return vfsManager.getResource(Rid.create(u)).map(r -> {
+			if (r == null) return null;
 
-			String name = folder.getName();
+			String name = r.getName();
 
-			for (FolderItem c : children) {
+			for (BrowsableItem c : children) {
 				if (name.equals(c.getResource().getName())) {
 					name = sha1String(u.toString());
 					break;
 				}
 			}
 
-			SharedTextBuilder tb = SharedTextBuilder.get();
-			tb.append(FolderItem.SCHEME).append(':').append(name);
-			return FolderItem.create(tb.releaseString(), this, folder, getLib());
+			if (r instanceof VirtualFolder) {
+				SharedTextBuilder tb = SharedTextBuilder.get();
+				tb.append(FolderItem.SCHEME).append(':').append(name);
+				return FolderItem.create(tb.releaseString(), this, (VirtualFolder) r, getLib());
+			} else if (r instanceof VirtualFile) {
+				Rid rid = r.getRid();
+				if (SCHEME_M3U.equals(rid.getScheme())) {
+					M3uFileSystem fs = M3uFileSystem.getInstance();
+					String id = SharedTextBuilder.get().append(M3uItem.SCHEME).append(':').append(fs.toId(rid)).releaseString();
+					return M3uItem.create(id, this, (VirtualFile) r, lib);
+				}
+			}
+
+			Log.e("Unsupported resource: " + r);
+			return null;
 		});
 	}
 
-
 	@SuppressWarnings({"rawtypes", "unchecked"})
-	private List<FolderItem> list() {
-		return (List) getUnsortedChildren().getOrThrow();
+	private FutureSupplier<List<BrowsableItem>> list() {
+		return (FutureSupplier) getUnsortedChildren().main();
 	}
 
 	@SuppressWarnings({"rawtypes", "unchecked"})
-	private void setNewChildren(List<FolderItem> c) {
+	private void setNewChildren(List<BrowsableItem> c) {
 		super.setChildren((List) c);
+	}
+
+	private void itemRemoved(Item i) {
+		VirtualResource r = i.getResource();
+		if (r instanceof M3uFile) M3uFileSystemProvider.removePlaylist((M3uFile) r);
 	}
 }

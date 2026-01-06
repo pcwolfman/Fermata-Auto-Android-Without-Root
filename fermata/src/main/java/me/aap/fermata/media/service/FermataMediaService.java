@@ -1,5 +1,16 @@
 package me.aap.fermata.media.service;
 
+import static android.Manifest.permission.POST_NOTIFICATIONS;
+import static android.app.PendingIntent.FLAG_IMMUTABLE;
+import static android.app.PendingIntent.FLAG_UPDATE_CURRENT;
+import static android.content.pm.PackageManager.PERMISSION_GRANTED;
+import static android.support.v4.media.session.PlaybackStateCompat.STATE_ERROR;
+import static android.support.v4.media.session.PlaybackStateCompat.STATE_NONE;
+import static android.support.v4.media.session.PlaybackStateCompat.STATE_PAUSED;
+import static android.support.v4.media.session.PlaybackStateCompat.STATE_PLAYING;
+import static android.support.v4.media.session.PlaybackStateCompat.STATE_STOPPED;
+import static java.util.Objects.requireNonNull;
+
 import android.annotation.SuppressLint;
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -26,39 +37,48 @@ import android.support.v4.media.session.PlaybackStateCompat;
 
 import androidx.annotation.DrawableRes;
 import androidx.annotation.NonNull;
+import androidx.appcompat.content.res.AppCompatResources;
+import androidx.core.app.ActivityCompat;
 import androidx.core.app.NotificationCompat;
 import androidx.core.app.NotificationCompat.Action;
 import androidx.core.app.NotificationManagerCompat;
+import androidx.core.content.ContextCompat;
 import androidx.media.MediaBrowserServiceCompat;
 import androidx.media.app.NotificationCompat.MediaStyle;
 import androidx.media.session.MediaButtonReceiver;
 
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
-import me.aap.fermata.BuildConfig;
 import me.aap.fermata.FermataApplication;
 import me.aap.fermata.R;
+import me.aap.fermata.addon.AddonManager;
+import me.aap.fermata.addon.FermataAddon;
+import me.aap.fermata.addon.FermataMediaServiceAddon;
 import me.aap.fermata.media.lib.DefaultMediaLib;
 import me.aap.fermata.media.lib.MediaLib;
 import me.aap.fermata.media.lib.MediaLib.PlayableItem;
 import me.aap.fermata.media.pref.PlaybackControlPrefs;
+import me.aap.fermata.util.Utils;
+import me.aap.utils.app.App;
 import me.aap.utils.log.Log;
 import me.aap.utils.ui.UiUtils;
-
-import static java.util.Objects.requireNonNull;
-import static me.aap.fermata.media.service.ControlServiceConnection.ACTION_CONTROL_SERVICE;
-import static me.aap.utils.misc.MiscUtils.isPackageInstalled;
 
 
 /**
  * @author Andrey Pavlenko
  */
-public class FermataMediaService extends MediaBrowserServiceCompat implements SharedConstants {
+public class FermataMediaService extends MediaBrowserServiceCompat {
 	public static final String ACTION_MEDIA_SERVICE = "me.aap.fermata.action.MediaService";
-	public static final String ACTION_CAR_MEDIA_SERVICE = "me.aap.fermata.action.CarMediaService";
 	public static final String INTENT_ATTR_NOTIF_COLOR = "me.aap.fermata.notif.color";
-	public static final String DEFAULT_NOTIF_COLOR = "#546e7a";
-	private static final int INTENT_CODE = 1;
+	public static final String DEFAULT_NOTIF_COLOR = "#3D2562";
+	private static final String CONTENT_STYLE_SUPPORTED =
+			"android.media.browse.CONTENT_STYLE_SUPPORTED";
+	private static final String CONTENT_STYLE_PLAYABLE_HINT =
+			"android.media.browse.CONTENT_STYLE_PLAYABLE_HINT";
+	private static final String CONTENT_STYLE_BROWSABLE_HINT =
+			"android.media.browse.CONTENT_STYLE_BROWSABLE_HINT";
+	private static final int CONTENT_STYLE_LIST_ITEM_HINT_VALUE = 1;
 	private static final String INTENT_PREV = "me.aap.fermata.action.prev";
 	private static final String INTENT_RW = "me.aap.fermata.action.rw";
 	private static final String INTENT_STOP = "me.aap.fermata.action.stop";
@@ -68,13 +88,13 @@ public class FermataMediaService extends MediaBrowserServiceCompat implements Sh
 	private static final String INTENT_NEXT = "me.aap.fermata.action.next";
 	private static final String INTENT_FAVORITE_ADD = "me.aap.fermata.action.favorite.add";
 	private static final String INTENT_FAVORITE_REMOVE = "me.aap.fermata.action.favorite.remove";
-	private static final String EXTRA_MEDIA_SEARCH_SUPPORTED = "android.media.browse.SEARCH_SUPPORTED";
+	private static final String EXTRA_MEDIA_SEARCH_SUPPORTED =
+			"android.media.browse.SEARCH_SUPPORTED";
 	private static final int NOTIF_ID = 1;
 	private static final String NOTIF_CHANNEL_ID = "Fermata";
-	private MediaLib lib;
+	private DefaultMediaLib lib;
 	private MediaSessionCompat session;
 	MediaSessionCallback callback;
-	FermataToControlConnection controlConnection;
 
 	private BroadcastReceiver intentReceiver;
 	private int notifColor;
@@ -105,24 +125,35 @@ public class FermataMediaService extends MediaBrowserServiceCompat implements Sh
 		callback = new MediaSessionCallback(this, session, lib,
 				PlaybackControlPrefs.create(FermataApplication.get().getDefaultSharedPreferences()),
 				FermataApplication.get().getHandler());
+		callback.onPrepare();
 		session.setCallback(callback);
 
-		Intent mediaButtonIntent = new Intent(Intent.ACTION_MEDIA_BUTTON, null, ctx,
-				MediaButtonReceiver.class);
-		session.setMediaButtonReceiver(PendingIntent.getBroadcast(ctx, 0, mediaButtonIntent, 0));
+		Intent mediaButtonIntent =
+				new Intent(Intent.ACTION_MEDIA_BUTTON, null, ctx, MediaButtonReceiver.class);
+		session.setMediaButtonReceiver(
+				PendingIntent.getBroadcast(ctx, 0, mediaButtonIntent, FLAG_IMMUTABLE));
 		notifColor = Color.parseColor(DEFAULT_NOTIF_COLOR);
+		App.get().getScheduler().schedule(lib::cleanUpPrefs, 1, TimeUnit.HOURS);
+		Log.d("FermataMediaService created");
+		for (FermataAddon a : AddonManager.get().getAddons()) {
+			if (a instanceof FermataMediaServiceAddon)
+				((FermataMediaServiceAddon) a).onServiceCreate(callback);
+		}
 	}
 
 	@Override
 	public void onDestroy() {
+		for (FermataAddon a : AddonManager.get().getAddons()) {
+			if (a instanceof FermataMediaServiceAddon)
+				((FermataMediaServiceAddon) a).onServiceDestroy(callback);
+		}
 		super.onDestroy();
 		NotificationManagerCompat.from(this).cancel(NOTIF_ID);
 		if (intentReceiver != null) unregisterReceiver(intentReceiver);
-		if (controlConnection != null) controlConnection.disconnect(true);
 		intentReceiver = null;
-		controlConnection = null;
 		callback.close();
 		session.release();
+		Log.d("FermataMediaService destroyed");
 	}
 
 	@Override
@@ -133,35 +164,16 @@ public class FermataMediaService extends MediaBrowserServiceCompat implements Sh
 
 	@Override
 	public IBinder onBind(Intent intent) {
-		String action = intent.getAction();
-		if (action == null) return super.onBind(intent);
-
-		switch (action) {
-			case ACTION_CAR_MEDIA_SERVICE:
-				if (BuildConfig.AUTO) connectToControl();
-			case ACTION_MEDIA_SERVICE:
-				notifColor = intent.getIntExtra(INTENT_ATTR_NOTIF_COLOR, notifColor);
-				return new ServiceBinder();
-			case ACTION_CONTROL_SERVICE:
-				return connectToControl();
+		if (ACTION_MEDIA_SERVICE.equals(intent.getAction())) {
+			notifColor = intent.getIntExtra(INTENT_ATTR_NOTIF_COLOR, notifColor);
+			return new ServiceBinder();
 		}
-
 		return super.onBind(intent);
 	}
 
-	private IBinder connectToControl() {
-		if (!isPackageInstalled(this, FermataToControlConnection.PKG_ID)) return null;
-
-		if (controlConnection == null) {
-			controlConnection = new FermataToControlConnection(this);
-			controlConnection.connect();
-		}
-
-		return controlConnection.getBinder();
-	}
-
 	@Override
-	public BrowserRoot onGetRoot(@NonNull String clientPackageName, int clientUid, Bundle rootHints) {
+	public BrowserRoot onGetRoot(@NonNull String clientPackageName, int clientUid,
+															 Bundle rootHints) {
 		Bundle extras = new Bundle();
 		extras.putBoolean(EXTRA_MEDIA_SEARCH_SUPPORTED, true);
 		extras.putBoolean(CONTENT_STYLE_SUPPORTED, true);
@@ -176,7 +188,8 @@ public class FermataMediaService extends MediaBrowserServiceCompat implements Sh
 	}
 
 	@Override
-	public void onLoadChildren(@NonNull String parentMediaId, @NonNull Result<List<MediaItem>> result) {
+	public void onLoadChildren(@NonNull String parentMediaId,
+														 @NonNull Result<List<MediaItem>> result) {
 		getLib().getChildren(parentMediaId, result);
 	}
 
@@ -186,7 +199,8 @@ public class FermataMediaService extends MediaBrowserServiceCompat implements Sh
 	}
 
 	@Override
-	public void onSearch(@NonNull String query, Bundle extras, @NonNull Result<List<MediaItem>> result) {
+	public void onSearch(@NonNull String query, Bundle extras,
+											 @NonNull Result<List<MediaItem>> result) {
 		getLib().search(query, result);
 	}
 
@@ -195,31 +209,20 @@ public class FermataMediaService extends MediaBrowserServiceCompat implements Sh
 		if (lib != null) lib.clearCache();
 	}
 
-	void updateSessionState(PlaybackStateCompat playbackState, MediaMetadataCompat meta,
-													List<MediaSessionCompat.QueueItem> queue, int repeat, int shuffle) {
-		if (BuildConfig.AUTO && (controlConnection != null)) {
-			MediaSessionState st = new MediaSessionState(playbackState, meta, queue, repeat, shuffle);
-			controlConnection.sendPlaybackState(st);
-		}
-	}
-
 	@SuppressLint("SwitchIntDef")
 	void updateNotification(int st, PlayableItem currentItem) {
 		switch (st) {
-			case PlaybackStateCompat.STATE_NONE:
-			case PlaybackStateCompat.STATE_STOPPED:
-			case PlaybackStateCompat.STATE_ERROR:
-				stopForeground(true);
-				break;
-			case PlaybackStateCompat.STATE_PAUSED:
+			case STATE_NONE, STATE_STOPPED, STATE_ERROR -> stopForeground(true);
+			case STATE_PAUSED -> {
+				if (ActivityCompat.checkSelfPermission(this, POST_NOTIFICATIONS) != PERMISSION_GRANTED) {
+					return;
+				}
 				NotificationManagerCompat.from(this).notify(NOTIF_ID, createNotification(st, currentItem));
 				stopForeground(false);
-				break;
-			case PlaybackStateCompat.STATE_PLAYING:
-				startForeground(NOTIF_ID, createNotification(st, currentItem));
-				break;
-			default:
-				break;
+			}
+			case STATE_PLAYING -> startForeground(NOTIF_ID, createNotification(st, currentItem));
+			default -> {
+			}
 		}
 	}
 
@@ -229,22 +232,17 @@ public class FermataMediaService extends MediaBrowserServiceCompat implements Sh
 		Context ctx = this;
 		MediaControllerCompat controller = session.getController();
 		MediaMetadataCompat mediaMetadata = controller.getMetadata();
-		NotificationCompat.Builder builder = new NotificationCompat.Builder(ctx, NOTIF_CHANNEL_ID)
-				.setContentIntent(notifContentIntent)
-				.setDeleteIntent(pi(INTENT_STOP))
-				.setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-				.setStyle(notifStyle)
-				.setSmallIcon(R.drawable.ic_notification)
-				.setColor(notifColor)
-				.setPriority(NotificationCompat.PRIORITY_HIGH)
-				.setShowWhen(false)
-				.setOnlyAlertOnce(true);
+		NotificationCompat.Builder builder =
+				new NotificationCompat.Builder(ctx, NOTIF_CHANNEL_ID).setContentIntent(notifContentIntent)
+						.setDeleteIntent(pi(INTENT_STOP)).setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+						.setStyle(notifStyle).setSmallIcon(R.drawable.notification).setColor(notifColor)
+						.setPriority(NotificationCompat.PRIORITY_HIGH).setShowWhen(false)
+						.setOnlyAlertOnce(true);
 
 		if (mediaMetadata != null) {
 			MediaDescriptionCompat description = mediaMetadata.getDescription();
 			Bitmap largeIcon = description.getIconBitmap();
-			builder.setContentTitle(description.getTitle())
-					.setContentText(description.getSubtitle())
+			builder.setContentTitle(description.getTitle()).setContentText(description.getSubtitle())
 					.setSubText(description.getDescription());
 
 			if (callback.isDefaultImage(largeIcon)) {
@@ -260,11 +258,8 @@ public class FermataMediaService extends MediaBrowserServiceCompat implements Sh
 			builder.setLargeIcon(largeIcon);
 		}
 
-		builder
-				.addAction(actionPrev)
-				.addAction(actionRw)
-				.addAction((st == PlaybackStateCompat.STATE_PLAYING) ? actionPause : actionPlay)
-				.addAction(actionFf)
+		builder.addAction(actionPrev).addAction(actionRw)
+				.addAction((st == STATE_PLAYING) ? actionPause : actionPlay).addAction(actionFf)
 				.addAction(actionNext)
 				.addAction(((i != null) && i.isFavoriteItem()) ? actionFavRm : actionFavAdd);
 
@@ -280,7 +275,8 @@ public class FermataMediaService extends MediaBrowserServiceCompat implements Sh
 		int max = UiUtils.toIntPx(this, 128);
 		if (s < min) s = min;
 		else if (s > max) s = max;
-		return UiUtils.drawBitmap(requireNonNull(getDrawable(icon)), notifColor, Color.WHITE, s, s);
+		return UiUtils.drawBitmap(requireNonNull(AppCompatResources.getDrawable(this, icon)),
+				notifColor, Utils.getLauncherColor(), s, s);
 	}
 
 	public void notificationInit() {
@@ -288,7 +284,8 @@ public class FermataMediaService extends MediaBrowserServiceCompat implements Sh
 
 		try {
 			Intent i = new Intent(this, Class.forName("me.aap.fermata.ui.activity.MainActivity"));
-			notifContentIntent = PendingIntent.getActivity(this, 0, i, PendingIntent.FLAG_UPDATE_CURRENT);
+			notifContentIntent =
+					PendingIntent.getActivity(this, 0, i, FLAG_IMMUTABLE | FLAG_UPDATE_CURRENT);
 		} catch (ClassNotFoundException ex) {
 			Log.e(ex);
 			notifContentIntent = session.getController().getSessionActivity();
@@ -300,20 +297,22 @@ public class FermataMediaService extends MediaBrowserServiceCompat implements Sh
 		actionPlay = new Action(R.drawable.play, getString(R.string.play), pi(INTENT_PLAY));
 		actionFf = new Action(R.drawable.ff, getString(R.string.fast_forward), pi(INTENT_FF));
 		actionNext = new Action(R.drawable.next, getString(R.string.next), pi(INTENT_NEXT));
-		actionFavAdd = new Action(R.drawable.favorite, getString(R.string.favorites_add),
-				pi(INTENT_FAVORITE_ADD));
+		actionFavAdd =
+				new Action(R.drawable.favorite, getString(R.string.favorites_add),
+						pi(INTENT_FAVORITE_ADD));
 		actionFavRm = new Action(R.drawable.favorite_filled, getString(R.string.favorites_remove),
 				pi(INTENT_FAVORITE_REMOVE));
 
-		notifStyle = new MediaStyle().setShowActionsInCompactView(0, 2, 5).setShowCancelButton(true)
+		notifStyle = new MediaStyle().setShowActionsInCompactView(0, 2, 4).setShowCancelButton(true)
 				.setCancelButtonIntent(MediaButtonReceiver.buildMediaButtonPendingIntent(this,
-						PlaybackStateCompat.ACTION_STOP))
-				.setMediaSession(session.getSessionToken());
+						PlaybackStateCompat.ACTION_STOP)).setMediaSession(session.getSessionToken());
 
 		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-			NotificationChannel nc = new NotificationChannel(NOTIF_CHANNEL_ID,
-					getString(R.string.media_service_name), NotificationManager.IMPORTANCE_LOW);
-			NotificationManager nmgr = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+			NotificationChannel nc =
+					new NotificationChannel(NOTIF_CHANNEL_ID, getString(R.string.media_service_name),
+							NotificationManager.IMPORTANCE_LOW);
+			NotificationManager nmgr =
+					(NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
 			if (nmgr != null) nmgr.createNotificationChannel(nc);
 		}
 
@@ -324,33 +323,15 @@ public class FermataMediaService extends MediaBrowserServiceCompat implements Sh
 				if (action == null) return;
 
 				switch (action) {
-					case INTENT_PREV:
-						callback.onSkipToPrevious();
-						break;
-					case INTENT_RW:
-						callback.onRewind();
-						break;
-					case INTENT_STOP:
-						callback.onStop();
-						break;
-					case INTENT_PLAY:
-						callback.onPlay();
-						break;
-					case INTENT_PAUSE:
-						callback.onPause();
-						break;
-					case INTENT_FF:
-						callback.onFastForward();
-						break;
-					case INTENT_NEXT:
-						callback.onSkipToNext();
-						break;
-					case INTENT_FAVORITE_ADD:
-						callback.favoriteAddRemove(true);
-						break;
-					case INTENT_FAVORITE_REMOVE:
-						callback.favoriteAddRemove(false);
-						break;
+					case INTENT_PREV -> callback.onSkipToPrevious();
+					case INTENT_RW -> callback.onRewind();
+					case INTENT_STOP -> callback.onStop();
+					case INTENT_PLAY -> callback.onPlay();
+					case INTENT_PAUSE -> callback.onPause();
+					case INTENT_FF -> callback.onFastForward();
+					case INTENT_NEXT -> callback.onSkipToNext();
+					case INTENT_FAVORITE_ADD -> callback.favoriteAddRemove(true);
+					case INTENT_FAVORITE_REMOVE -> callback.favoriteAddRemove(false);
 				}
 			}
 		};
@@ -366,12 +347,13 @@ public class FermataMediaService extends MediaBrowserServiceCompat implements Sh
 		filter.addAction(INTENT_FAVORITE_ADD);
 		filter.addAction(INTENT_FAVORITE_REMOVE);
 
-		registerReceiver(intentReceiver, filter);
+		ContextCompat.registerReceiver(this, intentReceiver, filter,
+				ContextCompat.RECEIVER_NOT_EXPORTED);
 	}
 
 	private PendingIntent pi(String action) {
 		Intent intent = new Intent(action);
-		return PendingIntent.getBroadcast(this, INTENT_CODE, intent, 0);
+		return PendingIntent.getBroadcast(this, 1, intent, FLAG_IMMUTABLE);
 	}
 
 	public final class ServiceBinder extends Binder {

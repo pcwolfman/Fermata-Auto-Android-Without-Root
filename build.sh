@@ -1,37 +1,60 @@
 #!/bin/sh
 set -e
 
-DEST_DIR="$1"
-[ -z "$DEST_DIR" ] && DEST_DIR="dist"
-
+APP_ID_SFX='.dear.google.why'
+DIR="$(cd "$(dirname "$0")"; pwd -P)"
+DEST_DIR="$DIR/dist"
 mkdir -p "$DEST_DIR"
+export NO_GS=true
+CLEAN='clean'
 
-bundletool_universal() {
-    local AAB="$1"
-    local ADD_SFX="$2"
-    local CUT_SFX="$3"
-    local AAB_FILE="$(basename "$AAB")"
-    local AAB_DIR="$(dirname "$AAB")"
-    local BASENAME="${AAB_FILE%${CUT_SFX}.*}"
-    local APKS="$AAB_DIR/$BASENAME.apks"
+while [ "$1" != "" ]; do
+    case "$1" in
+        -nc)
+            unset CLEAN
+            ;;
+        -a)
+            ARM=true
+            ;;
+        *)
+            echo "Unknown argument: $1"
+            exit 1
+            ;;
+    esac
+    shift
+done
 
-    bundletool build-apks --bundle="$AAB" --output="$APKS" --mode=universal --overwrite
-    unzip -o "$APKS" universal.apk -d "$AAB_DIR"
-    mv "$AAB_DIR/universal.apk" "$AAB_DIR/$BASENAME${ADD_SFX}.apk"
-    rm "$APKS"
+if [ -z "$ANDROID_SDK_ROOT" ]; then
+    if [ -f "$DIR/local.properties" ]; then
+        ANDROID_SDK_ROOT="$(grep sdk.dir= local.properties | cut -d = -f2)"
+    fi
+fi
+
+if [ -z "$ANDROID_SDK_ROOT" ]; then
+    echo 'ANDROID_SDK_ROOT environment variable is not set'
+    exit 1
+else
+    echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+fi
+
+CMAKE_PATH="$(find $ANDROID_SDK_ROOT/cmake/* -maxdepth 1 -type d -name bin | sort -V | tail -1)"
+echo "CMAKE_PATH=$CMAKE_PATH"
+export PATH=$CMAKE_PATH:$PATH
+
+build_apk() {
+    local sfx='arm64'
+    local abi='arm64-v8a'
+
+    if [ "$1" = 'arm' ]; then
+        sfx='arm'
+        abi='armeabi-v7a'
+    fi
+
+    ./gradlew $CLEAN fermata:packageAutoReleaseUniversalApk -PABI=$abi -PAPP_ID_SFX=$APP_ID_SFX
+    local path=$(ls ./fermata/build/outputs/apk_from_bundle/autoRelease/fermata-*.apk)
+    local name=${path##*/}
+    mv $path "$DEST_DIR/${name%auto-release-universal.apk}auto-universal-$sfx.apk"
 }
 
-./gradlew clean fermata:bundleRelease -PABI='arm64-v8a,armeabi-v7a'
-mv ./fermata/build/outputs/bundle/autoRelease/fermata-*.aab "$DEST_DIR"
-mv ./fermata/build/outputs/bundle/mobileRelease/fermata-*.aab "$DEST_DIR"
-
-./gradlew -p control assembleRelease
-mv ./control/build/outputs/apk/release/fermata-auto-control-*-release.apk "$DEST_DIR"
-
-./gradlew clean fermata:bundleRelease -PABI=arm64-v8a
-bundletool_universal ./fermata/build/outputs/bundle/autoRelease/fermata-*-release.aab -universal-arm64 -release
-mv ./fermata/build/outputs/bundle/autoRelease/fermata-*.apk "$DEST_DIR"
-
-./gradlew clean fermata:bundleRelease -PABI=armeabi-v7a
-bundletool_universal ./fermata/build/outputs/bundle/autoRelease/fermata-*-release.aab -universal-arm -release
-mv ./fermata/build/outputs/bundle/autoRelease/fermata-*.apk "$DEST_DIR"
+[ $ARM ] && build_apk 'arm' || true
+build_apk 'arm64'

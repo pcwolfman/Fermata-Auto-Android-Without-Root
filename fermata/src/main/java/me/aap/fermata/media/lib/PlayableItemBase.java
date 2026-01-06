@@ -1,5 +1,9 @@
 package me.aap.fermata.media.lib;
 
+import static java.util.Objects.requireNonNull;
+import static me.aap.utils.async.Completed.completed;
+import static me.aap.utils.async.Completed.completedVoid;
+
 import android.support.v4.media.MediaMetadataCompat;
 
 import androidx.annotation.Keep;
@@ -12,15 +16,12 @@ import me.aap.fermata.media.lib.MediaLib.BrowsableItem;
 import me.aap.fermata.media.lib.MediaLib.PlayableItem;
 import me.aap.fermata.media.pref.BrowsableItemPrefs;
 import me.aap.fermata.media.pref.PlayableItemPrefs;
+import me.aap.utils.async.Completable;
 import me.aap.utils.async.FutureSupplier;
 import me.aap.utils.async.Promise;
 import me.aap.utils.text.SharedTextBuilder;
 import me.aap.utils.text.TextUtils;
 import me.aap.utils.vfs.VirtualResource;
-
-import static java.util.Objects.requireNonNull;
-import static me.aap.utils.async.Completed.completed;
-import static me.aap.utils.async.Completed.completedVoid;
 
 /**
  * @author Andrey Pavlenko
@@ -54,17 +55,21 @@ public abstract class PlayableItemBase extends ItemBase implements PlayableItem,
 	@Override
 	public FutureSupplier<MediaMetadataCompat> getMediaData() {
 		FutureSupplier<MediaMetadataCompat> m = META.get(this);
-		if (m != null) return m;
+		if (isMediaDataValid(m)) return m.fork();
 
 		Promise<MediaMetadataCompat> load = new Promise<>();
 
-		for (; !META.compareAndSet(this, null, load); m = META.get(this)) {
-			if (m != null) return m;
+		for (; !META.compareAndSet(this, m, load); m = META.get(this)) {
+			if (m != null) return m.fork();
 		}
 
 		loadMeta().thenReplaceOrClear(META, this, load);
 		m = META.get(this);
-		return (m != null) ? m : load;
+		return ((m != null) ? m : load).fork();
+	}
+
+	protected boolean isMediaDataValid(FutureSupplier<MediaMetadataCompat> d) {
+		return d != null;
 	}
 
 	@NonNull
@@ -78,6 +83,12 @@ public abstract class PlayableItemBase extends ItemBase implements PlayableItem,
 			getLib().getMetadataRetriever().updateDuration(this, duration);
 			return completedVoid();
 		});
+	}
+
+	@NonNull
+	@Override
+	public PlayableItem export(String exportId, BrowsableItem parent) {
+		return ExportedItem.create(this, exportId, parent);
 	}
 
 	@NonNull
@@ -97,27 +108,31 @@ public abstract class PlayableItemBase extends ItemBase implements PlayableItem,
 		}
 	}
 
-	protected void setMeta(MediaMetadataCompat m) {
-		setMeta(completed(m));
-	}
-
 	protected void setMeta(FutureSupplier<MediaMetadataCompat> m) {
+		reset();
 		META.set(this, m);
 		m.thenReplaceOrClear(META, this);
 	}
 
+	@SuppressWarnings("unchecked")
 	protected void setMeta(MetadataBuilder mb) {
-		FutureSupplier<MediaMetadataCompat> m = META.get(this);
-		if (m != null) return;
+		FutureSupplier<MediaMetadataCompat> old = META.get(this);
+		if (isMediaDataValid(old)) return;
 
-		m = buildMeta(mb);
+		FutureSupplier<MediaMetadataCompat> m = buildMeta(mb);
 
-		if (META.compareAndSet(this, null, m)) m.thenReplace(META, this);
-		else m.cancel();
+		if (META.compareAndSet(this, old, m)) {
+			m.onSuccess(md -> {
+				if (!META.compareAndSet(this, m, completed(md))) return;
+				if (old instanceof Completable<?>) ((Completable<MediaMetadataCompat>) old).complete(md);
+			});
+		} else {
+			m.cancel();
+		}
 	}
 
 	@Override
-	void reset() {
+	protected void reset() {
 		super.reset();
 		meta = null;
 	}

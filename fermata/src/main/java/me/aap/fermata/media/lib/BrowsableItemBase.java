@@ -1,5 +1,13 @@
 package me.aap.fermata.media.lib;
 
+import static java.util.Collections.emptyList;
+import static java.util.Collections.shuffle;
+import static me.aap.utils.async.Completed.completed;
+import static me.aap.utils.async.Completed.completedEmptyList;
+import static me.aap.utils.async.Completed.completedVoid;
+import static me.aap.utils.collection.CollectionUtils.filterMap;
+import static me.aap.utils.collection.NaturalOrderComparator.compareNatural;
+
 import android.support.v4.media.MediaMetadataCompat;
 
 import androidx.annotation.Keep;
@@ -11,8 +19,6 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Random;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 
 import me.aap.fermata.R;
@@ -28,13 +34,6 @@ import me.aap.utils.holder.IntHolder;
 import me.aap.utils.log.Log;
 import me.aap.utils.text.SharedTextBuilder;
 import me.aap.utils.vfs.VirtualResource;
-
-import static java.util.Collections.emptyList;
-import static me.aap.utils.async.Completed.completed;
-import static me.aap.utils.async.Completed.completedEmptyList;
-import static me.aap.utils.async.Completed.completedVoid;
-import static me.aap.utils.collection.CollectionUtils.filterMap;
-import static me.aap.utils.collection.NaturalOrderComparator.compareNatural;
 
 /**
  * @author Andrey Pavlenko
@@ -62,13 +61,14 @@ public abstract class BrowsableItemBase extends ItemBase implements BrowsableIte
 
 	@NonNull
 	@Override
+	@SuppressWarnings("unchecked")
 	public FutureSupplier<List<Item>> getUnsortedChildren() {
 		FutureSupplier<List<Item>> c = CHILDREN.get(this);
 		if (c != null) return c;
 
 		Promise<List<Item>> load = new Promise<>();
 
-		for (; !CHILDREN.compareAndSet(this, null, load); c = CHILDREN.get(this)) {
+		for (; !CHILDREN.compareAndSet(this, c, load); c = CHILDREN.get(this)) {
 			if (c != null) return c;
 		}
 
@@ -79,6 +79,7 @@ public abstract class BrowsableItemBase extends ItemBase implements BrowsableIte
 
 	@NonNull
 	@Override
+	@SuppressWarnings("unchecked")
 	public FutureSupplier<List<Item>> getChildren() {
 		FutureSupplier<List<Item>> c = CHILDREN.get(this);
 		if (isDone(c)) return c;
@@ -116,7 +117,7 @@ public abstract class BrowsableItemBase extends ItemBase implements BrowsableIte
 		String pattern = getChildrenIdPattern();
 
 		if (pattern != null) {
-			return getLib().getMetadataRetriever().queryMetadata(pattern).then(meta -> {
+			return getLib().getMetadataRetriever().queryMetadata(pattern, this).then(meta -> {
 				List<PlayableItem> playable;
 				int size = meta.size();
 
@@ -171,7 +172,12 @@ public abstract class BrowsableItemBase extends ItemBase implements BrowsableIte
 	@NonNull
 	@Override
 	public FutureSupplier<Iterator<PlayableItem>> getShuffleIterator() {
-		if ((shuffle == null) || (shuffle.isDone() && !shuffle.get(null).hasNext())) {
+		if ((shuffle == null) || shuffle.isDone()) {
+			if (shuffle != null) {
+				Iterator<PlayableItem> cur = shuffle.peek();
+				if ((cur != null) && cur.hasNext()) return shuffle;
+			}
+
 			shuffle = getPlayableChildren(false, false, Integer.MAX_VALUE).map(list -> {
 				List<PlayableItem> l = new ArrayList<>(list);
 				shuffle(l);
@@ -214,11 +220,12 @@ public abstract class BrowsableItemBase extends ItemBase implements BrowsableIte
 	public FutureSupplier<Void> refresh() {
 		FutureSupplier<List<Item>> list = CHILDREN.get(this);
 		if (list == null) return super.updateTitles();
-		return list.then(children -> {
-			for (Item i : children) {
-				if (i instanceof ItemBase) ((ItemBase) i).reset();
-				else i.updateTitles();
-			}
+
+		return list.then(children -> Async.forEach(i -> {
+			if (i instanceof ItemBase) ((ItemBase) i).reset();
+			if (i instanceof BrowsableItem) return ((BrowsableItem) i).refresh();
+			return i.updateTitles();
+		}, children)).then(v -> {
 			CHILDREN.compareAndSet(this, list, null);
 			return super.updateTitles();
 		});
@@ -228,8 +235,11 @@ public abstract class BrowsableItemBase extends ItemBase implements BrowsableIte
 	@Override
 	public FutureSupplier<Void> rescan() {
 		String pattern = getChildrenIdPattern();
-		if (pattern != null) getLib().getMetadataRetriever().clearMetadata(pattern);
-		return refresh();
+		if (pattern != null) {
+			return getLib().getMetadataRetriever().clearMetadata(pattern).main().thenRun(this::refresh);
+		} else {
+			return refresh();
+		}
 	}
 
 	void setChildren(List<Item> c) {
@@ -278,22 +288,13 @@ public abstract class BrowsableItemBase extends ItemBase implements BrowsableIte
 		}
 	}
 
-	private void shuffle(List<?> l) {
-		Random rnd = ThreadLocalRandom.current();
-
-		for (int i = 0, s = l.size(); i < s; i++) {
-			int next = rnd.nextInt(s - i);
-			Collections.swap(l, i, next);
-		}
-	}
-
 	private int compareByFile(Item i1, Item i2, boolean desc) {
 		if (i1 instanceof BrowsableItem) {
 			if (i2 instanceof BrowsableItem) {
 				VirtualResource f1 = i1.getResource();
 				VirtualResource f2 = i2.getResource();
-				return (f1 != null) && (f2 != null) ? compareNatural(f1.getName(), f2.getName(), desc) :
-						compareNatural(name(i1), name(i2), desc);
+				return (f1 != null) && (f2 != null) ? compareNatural(f1.getName(), f2.getName(), desc, true) :
+						compareNatural(name(i1), name(i2), desc, true);
 			} else {
 				return -1;
 			}
@@ -302,18 +303,18 @@ public abstract class BrowsableItemBase extends ItemBase implements BrowsableIte
 		} else {
 			VirtualResource f1 = i1.getResource();
 			VirtualResource f2 = i2.getResource();
-			return (f1 != null) && (f2 != null) ? compareNatural(f1.getName(), f2.getName(), desc) :
-					compareNatural(name(i1), name(i2), desc);
+			return (f1 != null) && (f2 != null) ? compareNatural(f1.getName(), f2.getName(), desc, true) :
+					compareNatural(name(i1), name(i2), desc, true);
 		}
 	}
 
-	private int compareByName(Item i1, Item i2, boolean desc) {
+	protected int compareByName(Item i1, Item i2, boolean desc) {
 		if (i1 instanceof BrowsableItem) {
-			return (i2 instanceof BrowsableItem) ? compareNatural(name(i1), name(i2), desc) : -1;
+			return (i2 instanceof BrowsableItem) ? compareNatural(name(i1), name(i2), desc, true) : -1;
 		} else if (i2 instanceof BrowsableItem) {
 			return 1;
 		} else {
-			return compareNatural(name(i1), name(i2), desc);
+			return compareNatural(name(i1), name(i2), desc, true);
 		}
 	}
 
@@ -363,9 +364,9 @@ public abstract class BrowsableItemBase extends ItemBase implements BrowsableIte
 
 	private static String name(Item i) {
 		if (i instanceof BrowsableItem) {
-			return ((BrowsableItem) i).getName();
+			return i.getName();
 		} else if (i instanceof PlayableItem) {
-			MediaMetadataCompat md = ((PlayableItem) i).getMediaData().get(null);
+			MediaMetadataCompat md = ((PlayableItem) i).getMediaData().peek();
 			String title = (md != null) ? md.getString(MediaMetadataCompat.METADATA_KEY_TITLE) : null;
 			if (title != null) return title;
 		}

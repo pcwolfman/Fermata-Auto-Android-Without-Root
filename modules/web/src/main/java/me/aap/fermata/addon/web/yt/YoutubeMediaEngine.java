@@ -1,13 +1,23 @@
 package me.aap.fermata.addon.web.yt;
 
+import static me.aap.fermata.media.pref.MediaPrefs.MEDIA_ENG_YT;
+import static me.aap.fermata.util.Utils.dynCtx;
+import static me.aap.utils.async.Completed.completed;
+
+import android.content.Context;
+import android.content.res.Resources;
 import android.media.AudioManager;
 import android.media.MediaMetadata;
 import android.support.v4.media.MediaMetadataCompat;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.core.content.res.ResourcesCompat;
 import androidx.media.AudioFocusRequestCompat;
 
+import com.google.android.play.core.splitcompat.SplitCompat;
+
+import me.aap.fermata.BuildConfig;
 import me.aap.fermata.addon.web.R;
 import me.aap.fermata.addon.web.yt.YoutubeAddon.VideoScale;
 import me.aap.fermata.media.engine.MediaEngine;
@@ -20,18 +30,19 @@ import me.aap.fermata.media.service.MediaSessionCallback;
 import me.aap.fermata.ui.activity.MainActivityDelegate;
 import me.aap.fermata.ui.view.VideoView;
 import me.aap.utils.async.FutureSupplier;
+import me.aap.utils.log.Log;
+import me.aap.utils.text.SharedTextBuilder;
+import me.aap.utils.ui.UiUtils;
 import me.aap.utils.ui.menu.OverlayMenu;
 import me.aap.utils.ui.menu.OverlayMenuItem;
 import me.aap.utils.vfs.VirtualResource;
 import me.aap.utils.vfs.generic.GenericFileSystem;
 
-import static me.aap.fermata.media.pref.MediaPrefs.MEDIA_ENG_YT;
-import static me.aap.utils.async.Completed.completed;
-
 /**
  * @author Andrey Pavlenko
  */
 class YoutubeMediaEngine implements MediaEngine, OverlayMenu.SelectionHandler {
+	private static final int VIDEO_QUALITY_MASK = 1 << 31;
 	private static final String ID = "youtube";
 	private static final String CURRENT_ID = ID + ":current";
 	private static final String NEXT_ID = ID + ":next";
@@ -62,6 +73,14 @@ class YoutubeMediaEngine implements MediaEngine, OverlayMenu.SelectionHandler {
 	}
 
 	void playing(String url) {
+		if (BuildConfig.AUTO && web.getAddon().skipAd()) {
+			web.loadUrl("javascript:\n" +
+					"if (document.querySelectorAll('.ad-showing').length > 0) {\n" +
+					"  var video = document.querySelector('video');\n" +
+					"  if (video != null) video.currentTime = video.duration;\n" +
+					"}");
+		}
+
 		if (url.startsWith("blob:")) url = url.substring(5);
 		current = new Current(url);
 		cb.setEngine(this);
@@ -170,9 +189,44 @@ class YoutubeMediaEngine implements MediaEngine, OverlayMenu.SelectionHandler {
 	}
 
 	@Override
+	public boolean hasVideoMenu() {
+		return true;
+	}
+
+	@Override
 	public void contributeToMenu(OverlayMenu.Builder b) {
-		b.addItem(me.aap.fermata.R.id.video_scaling, R.drawable.video_scaling,
-				me.aap.fermata.R.string.video_scaling).setSubmenu(this::videoScalingMenu);
+		Context ctx = dynCtx(web.getContext());
+		Resources r = ctx.getResources();
+		SplitCompat.install(ctx);
+		b.addItem(R.id.video_quality,
+				ResourcesCompat.getDrawable(r, R.drawable.video_quality, ctx.getTheme()),
+				r.getString(R.string.video_quality)).setFutureSubmenu(this::videoQualityMenu);
+		b.addItem(me.aap.fermata.R.id.video_scaling,
+				ResourcesCompat.getDrawable(r, R.drawable.video_scaling, ctx.getTheme()),
+				r.getString(me.aap.fermata.R.string.video_scaling)).setSubmenu(this::videoScalingMenu);
+	}
+
+	private FutureSupplier<Void> videoQualityMenu(OverlayMenu.Builder b) {
+		b.setSelectionHandler(this);
+		return web.getVideoQualities().timeout(1100).main()
+				.onFailure(err -> Log.e(err, "Failed to load video qualities"))
+				.map(qualities -> {
+					if ((qualities == null) || (qualities.isEmpty())) {
+						b.addItem(me.aap.fermata.R.id.auto, null, me.aap.fermata.R.string.auto)
+								.setChecked(true, true);
+						return null;
+					}
+
+					String[] all = qualities.split(";");
+					for (int i = 0; i < all.length; i++) {
+						String q = all[i];
+						if (q.startsWith("*")) q = q.substring(1);
+						//noinspection StringEquality
+						b.addItem(UiUtils.getArrayItemId(i), null, q).setChecked(q != all[i], true)
+								.setData(i | VIDEO_QUALITY_MASK);
+					}
+					return null;
+				});
 	}
 
 	private void videoScalingMenu(OverlayMenu.Builder b) {
@@ -190,22 +244,29 @@ class YoutubeMediaEngine implements MediaEngine, OverlayMenu.SelectionHandler {
 
 	@Override
 	public boolean menuItemSelected(OverlayMenuItem item) {
-		switch (item.getItemId()) {
-			case me.aap.fermata.R.id.video_scaling_best:
-				web.setScale(VideoScale.CONTAIN);
-				return true;
-			case me.aap.fermata.R.id.video_scaling_fill:
-				web.setScale(VideoScale.FILL);
-				return true;
-			case R.id.video_scaling_fill_proportional:
-				web.setScale(VideoScale.COVER);
-				return true;
-			case me.aap.fermata.R.id.video_scaling_orig:
-				web.setScale(VideoScale.NONE);
-				return true;
-			default:
-				return false;
+		int itemId = item.getItemId();
+		if (itemId == me.aap.fermata.R.id.video_scaling_best) {
+			web.setScale(VideoScale.CONTAIN);
+			return true;
+		} else if (itemId == me.aap.fermata.R.id.video_scaling_fill) {
+			web.setScale(VideoScale.FILL);
+			return true;
+		} else if (itemId == R.id.video_scaling_fill_proportional) {
+			web.setScale(VideoScale.COVER);
+			return true;
+		} else if (itemId == me.aap.fermata.R.id.video_scaling_orig) {
+			web.setScale(VideoScale.NONE);
+			return true;
+		} else if (item.getData() instanceof Integer) {
+			int d = item.getData();
+			if ((d & VIDEO_QUALITY_MASK) != 0) web.setVideoQuality(d & ~VIDEO_QUALITY_MASK);
 		}
+		return false;
+	}
+
+	@Override
+	public boolean isSplitModeSupported() {
+		return false;
 	}
 
 	static boolean isYoutubeItem(MediaLib.Item i) {
@@ -218,8 +279,8 @@ class YoutubeMediaEngine implements MediaEngine, OverlayMenu.SelectionHandler {
 		}
 
 		@Override
-		public boolean isStream() {
-			return false;
+		public boolean isSeekable() {
+			return true;
 		}
 
 		@Override
@@ -235,6 +296,11 @@ class YoutubeMediaEngine implements MediaEngine, OverlayMenu.SelectionHandler {
 		@Override
 		public boolean equals(@Nullable Object obj) {
 			return obj == this;
+		}
+
+		@Override
+		protected String buildSubtitle(MediaMetadataCompat md, SharedTextBuilder tb) {
+			return null;
 		}
 	}
 

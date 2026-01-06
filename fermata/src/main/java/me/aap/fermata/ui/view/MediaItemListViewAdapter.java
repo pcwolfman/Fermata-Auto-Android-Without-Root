@@ -1,6 +1,9 @@
 package me.aap.fermata.ui.view;
 
-import android.support.v4.media.MediaDescriptionCompat;
+import static me.aap.utils.async.Completed.completedVoid;
+import static me.aap.utils.concurrent.ConcurrentUtils.ensureMainThread;
+import static me.aap.utils.function.ResultConsumer.Cancel.isCancellation;
+
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.View.OnClickListener;
@@ -15,26 +18,24 @@ import java.util.List;
 import java.util.regex.Pattern;
 
 import me.aap.fermata.R;
+import me.aap.fermata.media.lib.ItemBase;
 import me.aap.fermata.media.lib.MediaLib.BrowsableItem;
 import me.aap.fermata.media.lib.MediaLib.Item;
 import me.aap.fermata.media.lib.MediaLib.PlayableItem;
 import me.aap.fermata.ui.activity.MainActivityDelegate;
+import me.aap.utils.app.App;
+import me.aap.utils.async.Async;
 import me.aap.utils.async.FutureSupplier;
 import me.aap.utils.collection.CollectionUtils;
 import me.aap.utils.log.Log;
 import me.aap.utils.ui.UiUtils;
 import me.aap.utils.ui.view.MovableRecyclerViewAdapter;
 
-import static java.util.Objects.requireNonNull;
-import static me.aap.utils.async.Completed.completedVoid;
-import static me.aap.utils.collection.CollectionUtils.filterMap;
-import static me.aap.utils.function.ResultConsumer.Cancel.isCancellation;
-
 /**
  * @author Andrey Pavlenko
  */
 public class MediaItemListViewAdapter extends MovableRecyclerViewAdapter<MediaItemViewHolder>
-		implements OnClickListener {
+		implements OnClickListener, Item.ChangeListener {
 	private final MainActivityDelegate activity;
 	private BrowsableItem parent;
 	private String filterText = "";
@@ -59,16 +60,24 @@ public class MediaItemListViewAdapter extends MovableRecyclerViewAdapter<MediaIt
 		return parent;
 	}
 
+	public BrowsableItem getRoot() {
+		BrowsableItem p = getParent();
+		return (p == null) ? null : p.getRoot();
+	}
+
 	public FutureSupplier<?> setParent(BrowsableItem parent) {
 		return setParent(parent, true);
 	}
 
 	@CallSuper
 	public FutureSupplier<?> setParent(BrowsableItem parent, boolean userAction) {
+		ensureMainThread(true);
+		if (this.parent != null) this.parent.removeChangeListener(this);
 		this.parent = parent;
 		list = Collections.emptyList();
-		notifyDataSetChanged();
+		notifyChanged();
 		if (parent == null) return completedVoid();
+		parent.addChangeListener(this);
 
 		FutureSupplier<?> f = parent.getChildren().main()
 				.addConsumer((result, fail, progress, total) -> {
@@ -89,21 +98,51 @@ public class MediaItemListViewAdapter extends MovableRecyclerViewAdapter<MediaIt
 
 	@CallSuper
 	protected void setChildren(List<? extends Item> children) {
-		list = filterMap(children, this::filter, (i, c, l) -> l.add(new MediaItemWrapper(c)), ArrayList::new);
-		notifyDataSetChanged();
+		ensureMainThread(true);
+		var filter = this.filter;
+
+		if (filter == null) {
+			list = CollectionUtils.map(children, MediaItemWrapper::new);
+		} else {
+			var l = list = new ArrayList<>();
+			var app = App.get();
+			Async.forEach(c ->
+					(l != list) ? null : c.getMediaDescription().onSuccess(md -> {
+						if (l != list) return;
+						var s = md.getTitle();
+						var matches = (s != null) && filter.matcher(s).find();
+
+						if (!matches) {
+							s = md.getSubtitle();
+							matches = (s != null) && filter.matcher(s).find();
+						}
+						if (matches) {
+							app.run(() -> {
+								l.add(new MediaItemWrapper(c));
+								notifyItemInserted(l.size() - 1);
+							});
+						}
+					}), children);
+		}
+		notifyChanged();
 	}
 
 	public void setFilter(String filter) {
 		if (!filter.equals(filterText)) {
 			filterText = filter;
-			this.filter = filter.isEmpty() ? null : Pattern.compile(Pattern.quote(filter), Pattern.CASE_INSENSITIVE);
-			setParent(getParent());
+			this.filter = filter.isEmpty() ? null :
+					Pattern.compile(Pattern.quote(filter), Pattern.CASE_INSENSITIVE);
+			var parent = getParent();
+			if (parent == null) return;
+			this.parent.getChildren().main().onSuccess(children -> {
+				if (getParent() == parent) setChildren(children);
+			});
 		}
 	}
 
-	public void reload() {
+	public FutureSupplier<?> reload() {
 		getListView().discardSelection();
-		setParent(getParent());
+		return setParent(getParent());
 	}
 
 	public void refresh() {
@@ -112,6 +151,12 @@ public class MediaItemListViewAdapter extends MovableRecyclerViewAdapter<MediaIt
 
 	public List<MediaItemWrapper> getList() {
 		return list;
+	}
+
+	@Override
+	public void mediaItemChanged(Item i) {
+		ensureMainThread(true);
+		if (i == parent) setParent(parent, false);
 	}
 
 	@CallSuper
@@ -124,36 +169,65 @@ public class MediaItemListViewAdapter extends MovableRecyclerViewAdapter<MediaIt
 	@CallSuper
 	@Override
 	protected boolean onItemMove(int fromPosition, int toPosition) {
-		MediaItemListView listView = getListView();
-		View c = listView.getChildAt(fromPosition);
-		if (c == null) return false;
-		MediaItemViewHolder h = (MediaItemViewHolder) listView.getChildViewHolder(c);
-		h.getItemView().hideMenu();
-		CollectionUtils.move(list, fromPosition, toPosition);
-		getParent().updateTitles().main().thenRun(this::refresh);
+		activity.getContextMenu().hide();
+		move(list, fromPosition, toPosition);
 		return true;
+	}
+
+	protected void swap(List<?> list, int fromPosition, int toPosition) {
+		updatePos((MediaItemWrapper) list.get(fromPosition), fromPosition, toPosition);
+		updatePos((MediaItemWrapper) list.get(toPosition), toPosition, fromPosition);
+		super.swap(list, fromPosition, toPosition);
+	}
+
+	private void updatePos(MediaItemWrapper w, int from, int to) {
+		Item i = w.getItem();
+		if (i instanceof ItemBase ib) {
+			if (ib.getSeqNum() == from + 1) ib.setSeqNum(to + 1);
+		}
+		i.updateTitles().main().onSuccess(t -> activity.post(() -> {
+			MediaItemView v = w.getView();
+			if (v != null) v.refresh();
+		}));
 	}
 
 	@NonNull
 	@Override
 	public MediaItemViewHolder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
-		MediaItemView v = (MediaItemView) LayoutInflater.from(parent.getContext()).inflate(R.layout.media_item_view, parent, false);
+		MediaItemView v = (MediaItemView) LayoutInflater.from(parent.getContext())
+				.inflate(R.layout.media_item_view, parent, false);
 		v.setClickable(true);
 		v.setOnClickListener(this);
-		v.setListView(getListView());
-		return new MediaItemViewHolder(v);
+		return new MediaItemViewHolder(v, getListView());
 	}
 
 	@Override
 	public void onBindViewHolder(@NonNull MediaItemViewHolder holder, int position) {
 		List<MediaItemWrapper> list = getList();
-		if (position < list.size()) holder.getItemView().setItemWrapper(list.get(position));
+		if (position < list.size()) holder.bind(list.get(position));
+	}
+
+	public void onDestroy() {
+		for (MediaItemWrapper w : getList()) {
+			MediaItemViewHolder h = w.getViewHolder();
+			if (h != null) h.recycled();
+		}
+		setParent(null, false);
 	}
 
 	@Override
 	public void onViewRecycled(@NonNull MediaItemViewHolder holder) {
-		MediaItemView i = holder.getItemView();
-		if (i != null) i.cancelLoading();
+		holder.recycled();
+	}
+
+	@Override
+	public void onViewAttachedToWindow(@NonNull MediaItemViewHolder holder) {
+		holder.attached();
+	}
+
+	@Override
+	public void onViewDetachedFromWindow(@NonNull MediaItemViewHolder holder) {
+		holder.detached();
 	}
 
 	@Override
@@ -166,7 +240,7 @@ public class MediaItemListViewAdapter extends MovableRecyclerViewAdapter<MediaIt
 	}
 
 	public boolean isItemViewSwipeEnabled() {
-		return filter == null;
+		return false;
 	}
 
 	@Override
@@ -203,19 +277,9 @@ public class MediaItemListViewAdapter extends MovableRecyclerViewAdapter<MediaIt
 		return selection;
 	}
 
-	private boolean filter(Item i) {
-		if (filter == null) return true;
-		MediaDescriptionCompat dsc = i.getMediaDescription().peek();
-		CharSequence title;
-
-		if (dsc != null) {
-			title = requireNonNull(dsc.getTitle());
-		} else if (i instanceof BrowsableItem) {
-			title = ((BrowsableItem) i).getName();
-		} else {
-			title = i.getResource().getName();
-		}
-
-		return filter.matcher(title).find();
+	private void notifyChanged() {
+		if ((listView != null) && listView.isComputingLayout())
+			App.get().getHandler().post(this::notifyDataSetChanged);
+		else notifyDataSetChanged();
 	}
 }
