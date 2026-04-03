@@ -11,6 +11,12 @@ Android Auto üzerinden çalışan, tüm Android sürümleriyle (Android 14, 15 
 ⚠️ Önemli: (iOS/iPhone desteklenmez).
 
 <div align="center">
+  <a href="https://t.me/carautoplus">
+    <img src="https://img.shields.io/badge/Telegram-Join%20Channel-blue?style=for-the-badge&logo=telegram&logoColor=white" height="50">
+  </a>
+</div>
+
+<div align="center">
   <a href="https://www.shopier.com/42498310">
     <img src="https://img.shields.io/badge/Sipariş Link %20NOW-orange?style=for-the-badge&logo=googleplay&logoColor=white" height="50">
   </a>
