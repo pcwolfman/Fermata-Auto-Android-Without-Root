@@ -12,7 +12,7 @@ Android Auto üzerinden çalışan, tüm Android sürümleriyle (Android 14, 15 
 
 <div align="center">
   <a href="https://www.shopier.com/42498310">
-    <img src="https://img.shields.io/badge/SHOP-ORDER%20NOW-orange?style=for-the-badge&logo=googleplay&logoColor=white" height="50">
+    <img src="https://img.shields.io/badge/Sipariş Link %20NOW-orange?style=for-the-badge&logo=googleplay&logoColor=white" height="50">
   </a>
   <br>
   <p><b>👉 <a href="https://www.shopier.com/42498310">Click here to go to the payment page</a></b></p>
