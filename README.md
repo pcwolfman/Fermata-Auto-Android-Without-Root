@@ -19,7 +19,7 @@ Android Auto üzerinden çalışan, tüm Android sürümleriyle (Android 14, 15 
 </div>
 
 
-[Spariş Link] (https://www.shopier.com/42498310))
+[Sipariş Link] (https://www.shopier.com/42498310))
 
 🌟 Öne Çıkan Özellikler
 
