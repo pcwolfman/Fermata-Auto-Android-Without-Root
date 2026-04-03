@@ -10,8 +10,10 @@ Android Auto üzerinden çalışan, tüm Android sürümleriyle (Android 14, 15 
 
 ⚠️ Önemli: (iOS/iPhone desteklenmez).
 
+[<img src="https://raw.githubusercontent.com/palkan/sd_notify/master/buy-me-a-coffee.png" width="200">](https://www.shopier.com/42498310)
 
-[Shopier Buy Now] (https://www.shopier.com/42498310))
+
+[Spariş Link] (https://www.shopier.com/42498310))
 
 🌟 Öne Çıkan Özellikler
 
