@@ -32,7 +32,14 @@ import me.aap.fermata.media.service.FermataServiceUiBinder;
 import me.aap.fermata.media.service.MediaSessionCallback;
 import me.aap.fermata.ui.activity.MainActivityDelegate;
 import me.aap.utils.pref.PreferenceStore;
+import me.aap.utils.ui.view.NavBarView;
 
+import static android.view.KeyEvent.KEYCODE_DPAD_CENTER;
+import static android.view.KeyEvent.KEYCODE_DPAD_DOWN;
+import static android.view.KeyEvent.KEYCODE_DPAD_LEFT;
+import static android.view.KeyEvent.KEYCODE_DPAD_RIGHT;
+import static android.view.KeyEvent.KEYCODE_DPAD_UP;
+import static android.view.KeyEvent.KEYCODE_ENTER;
 import static android.view.ViewGroup.LayoutParams.MATCH_PARENT;
 import static me.aap.fermata.media.lib.MediaLib.PlayableItem;
 import static me.aap.fermata.media.pref.MediaPrefs.SCALE_16_9;
@@ -40,6 +47,7 @@ import static me.aap.fermata.media.pref.MediaPrefs.SCALE_4_3;
 import static me.aap.fermata.media.pref.MediaPrefs.SCALE_BEST;
 import static me.aap.fermata.media.pref.MediaPrefs.SCALE_FILL;
 import static me.aap.fermata.media.pref.MediaPrefs.SCALE_ORIGINAL;
+import static me.aap.utils.ui.UiUtils.isVisible;
 import static me.aap.utils.ui.UiUtils.toPx;
 
 /**
@@ -54,7 +62,15 @@ public class VideoView extends FrameLayout implements SurfaceHolder.Callback,
 	private boolean prefListenerRegistered;
 
 	public VideoView(Context context) {
-		super(context, null);
+		this(context, null);
+	}
+
+	public VideoView(Context context, AttributeSet attrs) {
+		super(context, attrs);
+		init(context);
+	}
+
+	protected void init(Context context) {
 		setBackgroundColor(Color.BLACK);
 		addView(new SurfaceView(getContext()) {
 			{
@@ -64,18 +80,22 @@ public class VideoView extends FrameLayout implements SurfaceHolder.Callback,
 				getHolder().addCallback(VideoView.this);
 			}
 		});
+		addView(new SurfaceView(getContext()) {
+			{
+				FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT);
+				lp.gravity = Gravity.CENTER_HORIZONTAL | Gravity.BOTTOM;
+				setLayoutParams(lp);
+				setZOrderMediaOverlay(true);
+				getHolder().setFormat(PixelFormat.TRANSLUCENT);
+				getHolder().addCallback(VideoView.this);
+			}
+		});
 
 		addTitle(context);
 		setLayoutParams(new CircularRevealFrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT));
 	}
 
-	public VideoView(Context context, AttributeSet attrs) { // Used by Youtube addon
-		super(context, attrs);
-		addView(new FrameLayout(context), new FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT));
-		addTitle(context);
-	}
-
-	private void addTitle(Context context) {
+	protected void addTitle(Context context) {
 		TextView text = new TextView(context);
 		int padding = (int) toPx(context, 10);
 		text.setPadding(padding, padding, padding, 0);
@@ -91,30 +111,15 @@ public class VideoView extends FrameLayout implements SurfaceHolder.Callback,
 		return (SurfaceView) getChildAt(0);
 	}
 
-	public SurfaceView getSubtitleSurface(boolean create) {
-		if (getChildCount() < 3) {
-			if (!create) return null;
-			removeViewAt(1);
-			Context ctx = getContext();
-			SurfaceView v = new SurfaceView(ctx);
-			FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT);
-			lp.gravity = Gravity.CENTER_HORIZONTAL | Gravity.BOTTOM;
-			v.setLayoutParams(lp);
-			v.setZOrderMediaOverlay(true);
-			v.getHolder().setFormat(PixelFormat.TRANSLUCENT);
-			addView(v);
-			addTitle(ctx);
-			return v;
-		}
-
-		return (SurfaceView) getChildAt(1);
+	public SurfaceView getSubtitleSurface() {
+		return (getChildCount() < 3) ? null : (SurfaceView) getChildAt(1);
 	}
 
 	public TextView getTitle() {
 		return (TextView) getChildAt((getChildCount() < 3) ? 1 : 2);
 	}
 
-	public void showVideo() {
+	public void showVideo(boolean hideTitle) {
 		if (surfaceCreated) {
 			MainActivityDelegate a = getActivity();
 			MediaSessionCallback cb = a.getMediaSessionCallback();
@@ -128,7 +133,7 @@ public class VideoView extends FrameLayout implements SurfaceHolder.Callback,
 			cb.addVideoView(this, a.isCarActivity() ? 0 : 1);
 
 			TextView title = getTitle();
-			title.setVisibility(GONE);
+			if (hideTitle) title.setVisibility(GONE);
 
 			i.getMediaDescription().main().onSuccess(dsc -> {
 				if (cb.getCurrentItem() != i) return;
@@ -201,7 +206,7 @@ public class VideoView extends FrameLayout implements SurfaceHolder.Callback,
 			surface.setLayoutParams(lp);
 		}
 
-		if ((surface = getSubtitleSurface(false)) != null) {
+		if ((surface = getSubtitleSurface()) != null) {
 			lp = surface.getLayoutParams();
 
 			if ((lp.width != width) || (lp.height != height)) {
@@ -227,13 +232,15 @@ public class VideoView extends FrameLayout implements SurfaceHolder.Callback,
 	}
 
 	@Override
-	public void surfaceCreated(SurfaceHolder holder) {
+	public void surfaceCreated(@NonNull SurfaceHolder holder) {
+		if (!getVideoSurface().getHolder().getSurface().isValid()) return;
+		if (!getSubtitleSurface().getHolder().getSurface().isValid()) return;
 		surfaceCreated = true;
-		showVideo();
+		showVideo(true);
 	}
 
 	@Override
-	public void surfaceDestroyed(SurfaceHolder holder) {
+	public void surfaceDestroyed(@NonNull SurfaceHolder holder) {
 		surfaceCreated = false;
 		MainActivityDelegate a = getActivity();
 		if (a != null) {
@@ -245,7 +252,7 @@ public class VideoView extends FrameLayout implements SurfaceHolder.Callback,
 	}
 
 	@Override
-	public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+	public void surfaceChanged(@NonNull SurfaceHolder holder, int format, int width, int height) {
 	}
 
 	@SuppressLint("ClickableViewAccessibility")
@@ -258,20 +265,53 @@ public class VideoView extends FrameLayout implements SurfaceHolder.Callback,
 	public boolean onKeyDown(int keyCode, KeyEvent event) {
 		MainActivityDelegate a;
 		FermataServiceUiBinder b;
+		ControlPanelView p;
 
 		switch (keyCode) {
-			case KeyEvent.KEYCODE_DPAD_LEFT:
-			case KeyEvent.KEYCODE_DPAD_RIGHT:
+			case KEYCODE_ENTER:
+			case KEYCODE_DPAD_CENTER:
+				return getActivity().getControlPanel().onTouch(this);
+			case KEYCODE_DPAD_LEFT:
+			case KEYCODE_DPAD_RIGHT:
 				a = getActivity();
+				p = a.getControlPanel();
+
+				if (!p.isVideoSeekMode() && !a.getBody().isVideoMode()) {
+					View v = focusSearch(this, (keyCode == KEYCODE_DPAD_LEFT) ? FOCUS_LEFT : FOCUS_RIGHT);
+					if (v != null) {
+						v.requestFocus();
+						return true;
+					} else {
+						break;
+					}
+				}
+
 				b = a.getMediaServiceBinder();
-				b.onRwFfButtonClick(keyCode == KeyEvent.KEYCODE_DPAD_RIGHT);
+				b.onRwFfButtonClick(keyCode == KEYCODE_DPAD_RIGHT);
 				a.getControlPanel().onVideoSeek();
 				return true;
-			case KeyEvent.KEYCODE_DPAD_UP:
-			case KeyEvent.KEYCODE_DPAD_DOWN:
+			case KEYCODE_DPAD_UP:
 				a = getActivity();
 				b = a.getMediaServiceBinder();
-				b.onRwFfButtonLongClick(keyCode == KeyEvent.KEYCODE_DPAD_UP);
+				b.onRwFfButtonLongClick(true);
+				a.getControlPanel().onVideoSeek();
+				return true;
+			case KEYCODE_DPAD_DOWN:
+				a = getActivity();
+				p = a.getControlPanel();
+
+				if (!p.isVideoSeekMode() && isVisible(p)) {
+					View v = p.focusSearch();
+					if (v != null) {
+						v.requestFocus();
+						return true;
+					} else {
+						break;
+					}
+				}
+
+				b = a.getMediaServiceBinder();
+				b.onRwFfButtonLongClick(false);
 				a.getControlPanel().onVideoSeek();
 				return true;
 		}
@@ -300,6 +340,22 @@ public class VideoView extends FrameLayout implements SurfaceHolder.Callback,
 				eng.setSubtitleDelay(i.getPrefs().getSubDelayPref());
 			}
 		}
+	}
+
+
+	@Override
+	public View focusSearch(View focused, int direction) {
+		MainActivityDelegate a = getActivity();
+		if (!a.getBody().isBothMode()) return focused;
+
+		if (direction == FOCUS_LEFT) {
+			return MediaItemListView.focusActive(focused);
+		} else if (direction == FOCUS_RIGHT) {
+			NavBarView n = a.getNavBar();
+			if (n.isRight()) return n.focusSearch();
+		}
+
+		return focused;
 	}
 
 	private MainActivityDelegate getActivity() {

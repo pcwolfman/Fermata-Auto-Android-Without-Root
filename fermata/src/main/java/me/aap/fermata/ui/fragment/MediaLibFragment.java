@@ -9,6 +9,7 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.recyclerview.widget.ItemTouchHelper;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
@@ -25,15 +26,21 @@ import me.aap.fermata.media.pref.BrowsableItemPrefs;
 import me.aap.fermata.media.service.FermataServiceUiBinder;
 import me.aap.fermata.ui.activity.MainActivityDelegate;
 import me.aap.fermata.ui.activity.MainActivityListener;
+import me.aap.fermata.ui.view.BodyLayout;
 import me.aap.fermata.ui.view.MediaItemListView;
 import me.aap.fermata.ui.view.MediaItemListViewAdapter;
 import me.aap.fermata.ui.view.MediaItemView;
 import me.aap.fermata.ui.view.MediaItemWrapper;
 import me.aap.utils.async.FutureSupplier;
+import me.aap.utils.function.BooleanConsumer;
 import me.aap.utils.pref.PreferenceStore;
+import me.aap.utils.ui.menu.OverlayMenu;
+import me.aap.utils.ui.menu.OverlayMenuItem;
 import me.aap.utils.ui.view.FloatingButton;
 import me.aap.utils.ui.view.ToolBarView;
 
+import static java.util.Objects.requireNonNull;
+import static me.aap.utils.collection.CollectionUtils.filterMap;
 import static me.aap.utils.misc.Assert.assertTrue;
 
 /**
@@ -44,7 +51,7 @@ public abstract class MediaLibFragment extends MainActivityFragment implements M
 	private ListAdapter adapter;
 	private int scrollPosition;
 
-	abstract ListAdapter createAdapter(FermataServiceUiBinder b);
+	protected abstract ListAdapter createAdapter(FermataServiceUiBinder b);
 
 	public abstract CharSequence getFragmentTitle();
 
@@ -167,6 +174,15 @@ public abstract class MediaLibFragment extends MainActivityFragment implements M
 	}
 
 	public boolean onBackPressed() {
+		MainActivityDelegate ad = getMainActivity();
+		if (ad == null) return false;
+		BodyLayout b = ad.getBody();
+
+		if (b.isVideoMode()) {
+			b.setMode(BodyLayout.Mode.BOTH);
+			return true;
+		}
+
 		ListAdapter a = getAdapter();
 		BrowsableItem p = a.getParent();
 		if (p == null) return false;
@@ -176,19 +192,24 @@ public abstract class MediaLibFragment extends MainActivityFragment implements M
 		return true;
 	}
 
-	public void reload() {
-		discardSelection();
-		getAdapter().reload();
+	@Override
+	public void onRefresh(BooleanConsumer refreshing) {
+		reload().onCompletion((r, f) -> refreshing.accept(false));
 	}
 
-	public void refresh() {
-		getAdapter().getParent().refresh();
-		reload();
+	public FutureSupplier<?> reload() {
+		discardSelection();
+		return getAdapter().reload();
+	}
+
+	public FutureSupplier<?> refresh() {
+		getLib().getVfsManager().clearCache();
+		return getAdapter().getParent().refresh().main().thenRun(this::reload);
 	}
 
 	public void rescan() {
-		getAdapter().getParent().rescan();
-		reload();
+		getLib().getVfsManager().clearCache();
+		getAdapter().getParent().rescan().main().thenRun(this::reload);
 	}
 
 	@Override
@@ -243,7 +264,62 @@ public abstract class MediaLibFragment extends MainActivityFragment implements M
 		}
 	}
 
-	boolean isSupportedItem(Item i) {
+	@Override
+	public void contributeToNavBarMenu(OverlayMenu.Builder builder) {
+		super.contributeToNavBarMenu(builder);
+
+		OverlayMenu.Builder b = builder.withSelectionHandler(this::navBarMenuItemSelected);
+		if (isRefreshSupported()) b.addItem(R.id.refresh, R.drawable.refresh, R.string.refresh);
+		if (isRescanSupported()) b.addItem(R.id.rescan, R.drawable.loading, R.string.rescan);
+
+		ListAdapter a = getAdapter();
+		if (!a.hasSelectable()) return;
+
+		if (a.getListView().isSelectionActive()) {
+			b.addItem(R.id.nav_select_all, R.drawable.check_box, R.string.select_all);
+			b.addItem(R.id.nav_unselect_all, R.drawable.check_box_blank, R.string.unselect_all);
+		} else {
+			b.addItem(R.id.nav_select, R.drawable.check_box, R.string.select);
+		}
+	}
+
+	protected boolean navBarMenuItemSelected(OverlayMenuItem item) {
+		int itemId = item.getItemId();
+
+		if (itemId == R.id.nav_select || itemId == R.id.nav_select_all) {
+			getAdapter().getListView().select(true);
+			return true;
+		} else if (itemId == R.id.nav_unselect_all) {
+			getAdapter().getListView().select(false);
+			return true;
+		} else if (itemId == R.id.refresh) {
+			refresh();
+			return true;
+		} else if (itemId == R.id.rescan) {
+			rescan();
+			return true;
+		} else if (itemId == R.id.favorites_add) {
+			requireNonNull(getLib()).getFavorites().addItems(filterMap(getAdapter().getList(),
+					MediaItemWrapper::isSelected, (i, w, l) -> l.add((PlayableItem) w.getItem()),
+					ArrayList::new));
+			discardSelection();
+			MediaLibFragment f = getMainActivity().getMediaLibFragment(R.id.favorites_fragment);
+			if (f != null) f.reload();
+			return true;
+		}
+
+		return false;
+	}
+
+	protected boolean isRefreshSupported() {
+		return false;
+	}
+
+	protected boolean isRescanSupported() {
+		return false;
+	}
+
+	protected boolean isSupportedItem(Item i) {
 		return false;
 	}
 
@@ -254,7 +330,8 @@ public abstract class MediaLibFragment extends MainActivityFragment implements M
 
 	@Nullable
 	public MediaItemListView getListView() {
-		return (MediaItemListView) getView();
+		View v = getView();
+		return (v == null) ? null : getView().findViewById(R.id.media_items_list_view);
 	}
 
 	public void discardSelection() {
@@ -286,9 +363,8 @@ public abstract class MediaLibFragment extends MainActivityFragment implements M
 
 	@Override
 	public void onActivityEvent(MainActivityDelegate a, long e) {
-		if (!handleActivityFinishEvent(a, e) && (e == SERVICE_BOUND)) {
-			bind(a.getMediaServiceBinder());
-		}
+		if (handleActivityFinishEvent(a, e) || handleActivityDestroyEvent(a, e)) return;
+		if (e == SERVICE_BOUND) bind(a.getMediaServiceBinder());
 	}
 
 	@Override
@@ -313,7 +389,7 @@ public abstract class MediaLibFragment extends MainActivityFragment implements M
 
 	public class ListAdapter extends MediaItemListViewAdapter {
 
-		ListAdapter(MainActivityDelegate activity, BrowsableItem parent) {
+		public ListAdapter(MainActivityDelegate activity, BrowsableItem parent) {
 			super(activity);
 			super.setParent(parent, false);
 		}
@@ -327,18 +403,24 @@ public abstract class MediaLibFragment extends MainActivityFragment implements M
 				getMainActivity().fireBroadcastEvent(FRAGMENT_CONTENT_CHANGED);
 
 				if (parent != null) {
-					return set.onSuccess(v -> {
-						int idx = indexOf(getList(), prev);
-
-						if (idx != -1) {
-							scrollPosition = idx;
-							scrollToPosition();
-						}
-					});
+					if (set.isDone()) {
+						scrollToPrev(prev);
+					} else {
+						scrollPosition = 0;
+						scrollToPosition();
+						set.onSuccess(v -> scrollToPrev(prev));
+					}
 				}
 			}
 
 			return set;
+		}
+
+		private void scrollToPrev(BrowsableItem prev) {
+			int idx = indexOf(getList(), prev);
+			if (idx != -1) scrollPosition = idx;
+			else if (scrollPosition == -1) scrollPosition = 0;
+			scrollToPosition();
 		}
 
 		@Override
@@ -347,10 +429,11 @@ public abstract class MediaLibFragment extends MainActivityFragment implements M
 			discardSelection();
 
 			if (i instanceof PlayableItem) {
-				PlayableItem pi = (PlayableItem) i;
 				MainActivityDelegate a = getMainActivity();
-				a.getMediaServiceBinder().playItem((PlayableItem) i);
-				if (pi.isVideo()) a.showFragment(R.id.video);
+				FermataServiceUiBinder b = a.getMediaServiceBinder();
+				PlayableItem cur = b.getCurrentItem();
+				b.playItem((PlayableItem) i);
+				if (i.equals(cur)) a.getBody().setMode(BodyLayout.Mode.VIDEO);
 			} else {
 				super.onClick(v);
 			}
@@ -367,7 +450,8 @@ public abstract class MediaLibFragment extends MainActivityFragment implements M
 				if (!isHidden()) scrollToPosition();
 			} else {
 				p.getLastPlayedItem().main().onSuccess(last -> {
-					scrollPosition = (last != null) ? indexOf(getList(), last) : -1;
+					scrollPosition = (last != null) ? indexOf(getList(), last) : 0;
+					if (scrollPosition == -1) scrollPosition = 0;
 					if (!isHidden()) scrollToPosition();
 				});
 			}

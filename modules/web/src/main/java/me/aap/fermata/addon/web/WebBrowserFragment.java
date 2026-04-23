@@ -18,6 +18,7 @@ import me.aap.fermata.addon.AddonManager;
 import me.aap.fermata.addon.web.yt.YoutubeFragment;
 import me.aap.fermata.ui.activity.MainActivityDelegate;
 import me.aap.fermata.ui.fragment.MainActivityFragment;
+import me.aap.utils.function.BooleanConsumer;
 import me.aap.utils.function.Supplier;
 import me.aap.utils.pref.BasicPreferenceStore;
 import me.aap.utils.pref.PreferenceSet;
@@ -59,6 +60,15 @@ public class WebBrowserFragment extends MainActivityFragment implements OverlayM
 		FermataChromeClient chromeClient = new FermataChromeClient(webView, fullScreenView);
 		webView.init(addon, webClient, chromeClient);
 		webView.loadUrl(addon.getLastUrl());
+	}
+
+	@Override
+	public void onRefresh(BooleanConsumer refreshing) {
+		FermataWebView v = getWebView();
+		if (v != null) {
+			v.getWebViewClient().loading = refreshing;
+			v.reload();
+		}
 	}
 
 	@Override
@@ -142,8 +152,9 @@ public class WebBrowserFragment extends MainActivityFragment implements OverlayM
 		b.addItem(me.aap.fermata.R.id.refresh, me.aap.fermata.R.drawable.refresh,
 				me.aap.fermata.R.string.refresh).setHandler(this);
 
-		if (v.canGoForward()) {
-			b.addItem(R.id.browser_forward, R.drawable.forward, R.string.go_forward).setHandler(this);
+		if (isDesktopVersionSupported()) {
+			b.addItem(R.id.desktop_version, R.drawable.desktop, R.string.desktop_version)
+					.setChecked(getAddon().isDesktopVersion()).setHandler(this);
 		}
 
 		FermataChromeClient chrome = v.getWebChromeClient();
@@ -161,6 +172,10 @@ public class WebBrowserFragment extends MainActivityFragment implements OverlayM
 				me.aap.fermata.R.string.bookmarks).setSubmenu(this::bookmarksMenu);
 	}
 
+	protected boolean isDesktopVersionSupported() {
+		return true;
+	}
+
 	@Override
 	public boolean menuItemSelected(OverlayMenuItem item) {
 		FermataWebView v = getWebView();
@@ -172,8 +187,9 @@ public class WebBrowserFragment extends MainActivityFragment implements OverlayM
 			case me.aap.fermata.R.id.refresh:
 				v.reload();
 				return true;
-			case R.id.browser_forward:
-				v.goForward();
+			case R.id.desktop_version:
+				WebBrowserAddon addon = getAddon();
+				addon.setDesktopVersion(!addon.isDesktopVersion());
 				return true;
 			case R.id.fullscreen:
 			case R.id.fullscreen_exit:
@@ -187,7 +203,7 @@ public class WebBrowserFragment extends MainActivityFragment implements OverlayM
 		return false;
 	}
 
-	private void bookmarksMenu(OverlayMenu.Builder b) {
+	public void bookmarksMenu(OverlayMenu.Builder b) {
 		WebBrowserAddon a = getAddon();
 		if (a == null) return;
 

@@ -10,12 +10,15 @@ import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
 import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.View;
 import android.widget.Toast;
 
+import androidx.annotation.LayoutRes;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatDelegate;
+import androidx.constraintlayout.widget.ConstraintSet;
 import androidx.core.widget.ContentLoadingProgressBar;
 import androidx.fragment.app.Fragment;
 import androidx.fragment.app.FragmentManager;
@@ -26,8 +29,11 @@ import java.util.Collection;
 import java.util.LinkedList;
 import java.util.List;
 
+import me.aap.fermata.BuildConfig;
 import me.aap.fermata.FermataApplication;
 import me.aap.fermata.R;
+import me.aap.fermata.addon.AddonManager;
+import me.aap.fermata.addon.MediaLibAddon;
 import me.aap.fermata.media.lib.MediaLib;
 import me.aap.fermata.media.lib.MediaLib.Item;
 import me.aap.fermata.media.lib.MediaLib.PlayableItem;
@@ -43,11 +49,12 @@ import me.aap.fermata.ui.fragment.MediaLibFragment;
 import me.aap.fermata.ui.fragment.NavBarMediator;
 import me.aap.fermata.ui.fragment.PlaylistsFragment;
 import me.aap.fermata.ui.fragment.SettingsFragment;
-import me.aap.fermata.ui.fragment.VideoFragment;
+import me.aap.fermata.ui.view.BodyLayout;
 import me.aap.fermata.ui.view.ControlPanelView;
 import me.aap.fermata.ui.view.VideoView;
 import me.aap.utils.app.App;
 import me.aap.utils.async.FutureSupplier;
+import me.aap.utils.function.Function;
 import me.aap.utils.function.IntObjectFunction;
 import me.aap.utils.function.Supplier;
 import me.aap.utils.log.Log;
@@ -68,16 +75,19 @@ import static me.aap.fermata.media.service.FermataMediaService.DEFAULT_NOTIF_COL
 import static me.aap.utils.async.Completed.completed;
 import static me.aap.utils.function.ResultConsumer.Cancel.isCancellation;
 import static me.aap.utils.ui.UiUtils.ID_NULL;
+import static me.aap.utils.ui.UiUtils.showAlert;
+import static me.aap.utils.ui.activity.ActivityListener.FRAGMENT_CONTENT_CHANGED;
 import static me.aap.utils.ui.activity.ActivityListener.SERVICE_BOUND;
 
 /**
  * @author Andrey Pavlenko
  */
-public class MainActivityDelegate extends ActivityDelegate implements
-		PreferenceStore.Listener, FermataServiceUiBinder.Listener {
+public class MainActivityDelegate extends ActivityDelegate implements PreferenceStore.Listener {
+	private final NavBarMediator navBarMediator = new NavBarMediator();
 	private FermataServiceUiBinder mediaServiceBinder;
 	private ToolBarView toolBar;
 	private NavBarView navBar;
+	private BodyLayout body;
 	private ControlPanelView controlPanel;
 	private FloatingButton floatingButton;
 	private ContentLoadingProgressBar progressBar;
@@ -105,8 +115,10 @@ public class MainActivityDelegate extends ActivityDelegate implements
 			typedArray.recycle();
 			FermataServiceUiBinder.bind(FermataApplication.get(), notifColor, isCarActivity(),
 					this::onMediaServiceBind);
+		} else if (mediaServiceBinder != null) {
+			onMediaServiceBind(mediaServiceBinder, null);
 		} else {
-			if (mediaServiceBinder != null) init();
+			onMediaServiceBind(mediaServiceBinder, new IllegalStateException("Media service is not bound"));
 		}
 	}
 
@@ -115,9 +127,22 @@ public class MainActivityDelegate extends ActivityDelegate implements
 		super.onActivityResume();
 	}
 
+	@Override
+	protected void onActivityDestroy() {
+		super.onActivityDestroy();
+
+		toolBar = null;
+		navBar = null;
+		controlPanel = null;
+		floatingButton = null;
+		progressBar = null;
+		contentLoading = null;
+		barsHidden = false;
+		videoMode = false;
+	}
+
 	public void onActivityFinish() {
 		if (mediaServiceBinder != null) {
-			mediaServiceBinder.removeBroadcastListener(this);
 			FermataApplication.get().unbindService(mediaServiceBinder);
 		}
 	}
@@ -149,7 +174,8 @@ public class MainActivityDelegate extends ActivityDelegate implements
 	}
 
 	public boolean isCarActivity() {
-		return getAppActivity().isCarActivity();
+		FermataActivity a = getAppActivity();
+		return (a != null) && a.isCarActivity();
 	}
 
 	@NonNull
@@ -180,6 +206,20 @@ public class MainActivityDelegate extends ActivityDelegate implements
 				getAppActivity().setTheme(R.style.AppTheme_Black);
 				break;
 		}
+	}
+
+	@Override
+	public boolean interceptTouchEvent(MotionEvent e, Function<MotionEvent, Boolean> view) {
+		if (BuildConfig.AUTO && (e.getAction() == MotionEvent.ACTION_DOWN)) {
+			FermataActivity a = getAppActivity();
+
+			if (a.isInputActive()) {
+				a.stopInput(null);
+				return true;
+			}
+		}
+
+		return super.interceptTouchEvent(e, view);
 	}
 
 	@Override
@@ -219,6 +259,14 @@ public class MainActivityDelegate extends ActivityDelegate implements
 		return navBar;
 	}
 
+	public BodyLayout getBody() {
+		return body;
+	}
+
+	public NavBarMediator getNavBarMediator() {
+		return navBarMediator;
+	}
+
 	public ToolBarView getToolBar() {
 		return toolBar;
 	}
@@ -236,14 +284,17 @@ public class MainActivityDelegate extends ActivityDelegate implements
 	}
 
 	public void setBarsHidden(boolean barsHidden) {
-		this.barsHidden = barsHidden;
-		int visibility = barsHidden ? GONE : VISIBLE;
-		ToolBarView tb = getToolBar();
-		if (tb.getMediator() != ToolBarView.Mediator.Invisible.instance) tb.setVisibility(visibility);
-		getNavBar().setVisibility(visibility);
+		App.get().getHandler().post(() -> {
+			this.barsHidden = barsHidden;
+			int visibility = barsHidden ? GONE : VISIBLE;
+			ToolBarView tb = getToolBar();
+			if (tb.getMediator() != ToolBarView.Mediator.Invisible.instance) tb.setVisibility(visibility);
+			getNavBar().setVisibility(visibility);
+		});
 	}
 
 	public void setVideoMode(boolean videoMode, @Nullable VideoView v) {
+		if (videoMode == this.videoMode) return;
 		ControlPanelView cp = getControlPanel();
 
 		if (videoMode) {
@@ -257,6 +308,8 @@ public class MainActivityDelegate extends ActivityDelegate implements
 			getWindow().clearFlags(FLAG_KEEP_SCREEN_ON);
 			if (cp != null) cp.disableVideoMode();
 		}
+
+		fireBroadcastEvent(FRAGMENT_CONTENT_CHANGED);
 	}
 
 	public boolean isVideoMode() {
@@ -299,23 +352,19 @@ public class MainActivityDelegate extends ActivityDelegate implements
 	}
 
 	protected ActivityFragment createFragment(int id) {
-		switch (id) {
-			case R.id.folders_fragment:
-				return new FoldersFragment();
-			case R.id.favorites_fragment:
-				return new FavoritesFragment();
-			case R.id.playlists_fragment:
-				return new PlaylistsFragment();
-			case R.id.settings_fragment:
-				return new SettingsFragment();
-			case R.id.audio_effects_fragment:
-				return new AudioEffectsFragment();
-			case R.id.video:
-				return new VideoFragment();
-			default:
-				ActivityFragment f = FermataApplication.get().getAddonManager().createFragment(id);
-				return (f != null) ? f : super.createFragment(id);
+		if (id == R.id.folders_fragment) {
+			return new FoldersFragment();
+		} else if (id == R.id.favorites_fragment) {
+			return new FavoritesFragment();
+		} else if (id == R.id.playlists_fragment) {
+			return new PlaylistsFragment();
+		} else if (id == R.id.settings_fragment) {
+			return new SettingsFragment();
+		} else if (id == R.id.audio_effects_fragment) {
+			return new AudioEffectsFragment();
 		}
+		ActivityFragment f = FermataApplication.get().getAddonManager().createFragment(id);
+		return (f != null) ? f : super.createFragment(id);
 	}
 
 	@Nullable
@@ -358,7 +407,9 @@ public class MainActivityDelegate extends ActivityDelegate implements
 		} else if (root instanceof MediaLib.Playlists) {
 			showFragment(R.id.playlists_fragment);
 		} else {
-			Log.d(new UnsupportedOperationException());
+			MediaLibAddon a = AddonManager.get().getMediaLibAddon(root);
+			if (a != null) showFragment(a.getAddonId());
+			else Log.d("Unsupported item: ", pi);
 		}
 
 		FermataApplication.get().getHandler().post(() -> {
@@ -417,15 +468,17 @@ public class MainActivityDelegate extends ActivityDelegate implements
 			discardSelection();
 			if (name == null) return;
 
-			Playlist pl = getLib().getPlaylists().addItem(name);
-			if (pl != null) {
-				selection.main().onSuccess(items -> {
-					pl.addItems(items);
-					MediaLibFragment f = getMediaLibFragment(R.id.playlists_fragment);
-					if (f != null) f.getAdapter().reload();
-				});
-			}
+			getLib().getPlaylists().addItem(name)
+					.onFailure(err -> showAlert(getContext(), err.getMessage()))
+					.then(pl -> selection.main().then(items -> pl.addItems(items)
+							.onFailure(err -> showAlert(getContext(), err.getMessage()))
+							.thenRun(() -> {
+								MediaLibFragment f = getMediaLibFragment(R.id.playlists_fragment);
+								if (f != null) f.getAdapter().reload();
+							}))
+					);
 		});
+
 		return true;
 	}
 
@@ -448,9 +501,12 @@ public class MainActivityDelegate extends ActivityDelegate implements
 
 	public void removeFromPlaylist(Playlist pl, List<PlayableItem> selection) {
 		discardSelection();
-		pl.removeItems(selection);
-		MediaLibFragment f = getMediaLibFragment(R.id.playlists_fragment);
-		if (f != null) f.getAdapter().reload();
+		pl.removeItems(selection)
+				.onFailure(err -> showAlert(getContext(), err.getMessage()))
+				.thenRun(() -> {
+					MediaLibFragment f = getMediaLibFragment(R.id.playlists_fragment);
+					if (f != null) f.getAdapter().reload();
+				});
 	}
 
 	private void discardSelection() {
@@ -469,13 +525,29 @@ public class MainActivityDelegate extends ActivityDelegate implements
 
 	private void init() {
 		FermataActivity a = getAppActivity();
-		a.setContentView(R.layout.main_activity);
+		a.setContentView(getLayout());
 		toolBar = a.findViewById(R.id.tool_bar);
 		progressBar = a.findViewById(R.id.content_loading_progress);
 		navBar = a.findViewById(R.id.nav_bar);
+		body = a.findViewById(R.id.body_layout);
 		controlPanel = a.findViewById(R.id.control_panel);
 		floatingButton = a.findViewById(R.id.floating_button);
 		controlPanel.bind(getMediaServiceBinder());
+	}
+
+	@LayoutRes
+	private int getLayout() {
+		FermataActivity a = getAppActivity();
+		MainActivityPrefs prefs = getPrefs();
+
+		switch (a.isCarActivity() ? prefs.getNavBarPosAAPref() : prefs.getNavBarPosPref()) {
+			default:
+				return R.layout.main_activity;
+			case NavBarView.POSITION_LEFT:
+				return R.layout.main_activity_left;
+			case NavBarView.POSITION_RIGHT:
+				return R.layout.main_activity_right;
+		}
 	}
 
 	private void onMediaServiceBind(FermataServiceUiBinder b, Throwable err) {
@@ -505,19 +577,14 @@ public class MainActivityDelegate extends ActivityDelegate implements
 					}
 				});
 
-				if (!f.isDone() || !f.peek()) {
+				if (!f.isDone() || f.isFailed() || !f.peek()) {
 					showFragment(R.id.folders_fragment);
 					setContentLoading(f);
 				}
-
-				FermataApplication.get().getHandler().post(() -> {
-					b.addBroadcastListener(this);
-					onPlayableChanged(null, b.getCurrentItem());
-				});
 			});
 		} else {
 			Log.e(err);
-			UiUtils.showAlert(getContext(), String.valueOf(err));
+			showAlert(getContext(), String.valueOf(err));
 		}
 	}
 
@@ -537,14 +604,32 @@ public class MainActivityDelegate extends ActivityDelegate implements
 		if (prefs.contains(MainActivityPrefs.THEME)) {
 			setTheme();
 			getAppActivity().recreate();
+		} else if (prefs.contains(MainActivityPrefs.NAV_BAR_POS) || prefs.contains(MainActivityPrefs.NAV_BAR_POS_AA)) {
+			FermataActivity a = getAppActivity();
+			MainActivityPrefs p = getPrefs();
+			int layout;
+
+			switch (a.isCarActivity() ? p.getNavBarPosAAPref() : p.getNavBarPosPref()) {
+				default:
+					layout = R.layout.main_activity;
+					getNavBar().setPosition(NavBarView.POSITION_BOTTOM);
+					break;
+				case NavBarView.POSITION_LEFT:
+					layout = R.layout.main_activity_left;
+					getNavBar().setPosition(NavBarView.POSITION_LEFT);
+					break;
+				case NavBarView.POSITION_RIGHT:
+					layout = R.layout.main_activity_right;
+					getNavBar().setPosition(NavBarView.POSITION_RIGHT);
+					break;
+			}
+
+			ConstraintSet cs = new ConstraintSet();
+			cs.clone(getContext(), layout);
+			cs.applyTo(findViewById(R.id.main_activity));
 		} else if (prefs.contains(MainActivityPrefs.FULLSCREEN)) {
 			setSystemUiVisibility();
 		}
-	}
-
-	@Override
-	public void onPlayableChanged(PlayableItem oldItem, PlayableItem newItem) {
-		if ((newItem != null) && !newItem.isExternal() && newItem.isVideo()) showFragment(R.id.video);
 	}
 
 	private boolean exitPressed;
@@ -559,11 +644,11 @@ public class MainActivityDelegate extends ActivityDelegate implements
 			case KeyEvent.KEYCODE_M:
 			case KeyEvent.KEYCODE_MENU:
 				if (keyEvent.isShiftPressed()) {
-					NavBarMediator.instance.showMenu(this);
+					getNavBarMediator().showMenu(this);
 				} else {
 					ControlPanelView cp = getControlPanel();
 					if (cp.isActive()) cp.showMenu();
-					else NavBarMediator.instance.showMenu(this);
+					else getNavBarMediator().showMenu(this);
 				}
 				break;
 			case KeyEvent.KEYCODE_P:

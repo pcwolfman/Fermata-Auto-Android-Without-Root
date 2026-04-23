@@ -14,6 +14,7 @@ import me.aap.fermata.addon.web.yt.YoutubeFragment;
 import me.aap.fermata.ui.activity.MainActivityDelegate;
 import me.aap.utils.async.Completed;
 import me.aap.utils.async.Promise;
+import me.aap.utils.function.BooleanConsumer;
 import me.aap.utils.log.Log;
 
 import static me.aap.utils.ui.activity.ActivityListener.FRAGMENT_CONTENT_CHANGED;
@@ -22,11 +23,16 @@ import static me.aap.utils.ui.activity.ActivityListener.FRAGMENT_CONTENT_CHANGED
  * @author Andrey Pavlenko
  */
 public class FermataWebClient extends WebViewClientCompat {
+	BooleanConsumer loading;
 
 	@Override
 	public void onPageStarted(WebView view, String url, Bitmap favicon) {
-		MainActivityDelegate a = MainActivityDelegate.get(view.getContext());
-		a.setContentLoading(new Promise<>());
+		if (loading != null) {
+			loading.accept(true);
+		} else {
+			MainActivityDelegate a = MainActivityDelegate.get(view.getContext());
+			if (a != null) a.setContentLoading(new Promise<>());
+		}
 		super.onPageStarted(view, url, favicon);
 	}
 
@@ -34,7 +40,14 @@ public class FermataWebClient extends WebViewClientCompat {
 	public void onPageFinished(WebView view, String url) {
 		FermataWebView v = (FermataWebView) view;
 		MainActivityDelegate a = MainActivityDelegate.get(view.getContext());
+		if (a == null) return;
 		a.setContentLoading(Completed.completedVoid());
+
+		if (loading != null) {
+			loading.accept(false);
+			loading = null;
+		}
+
 		super.onPageFinished(view, url);
 		((FermataWebView) view).hideKeyboard();
 		v.pageLoaded(url);
@@ -46,6 +59,7 @@ public class FermataWebClient extends WebViewClientCompat {
 		if (isYoutubeUri(request.getUrl())) {
 			try {
 				MainActivityDelegate a = MainActivityDelegate.get(view.getContext());
+				if (a == null) return false;
 				YoutubeFragment f = a.showFragment(me.aap.fermata.R.id.youtube_fragment);
 				f.loadUrl(request.getUrl().toString());
 				return true;

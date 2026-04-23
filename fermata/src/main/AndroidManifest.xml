@@ -23,6 +23,12 @@
         android:name="android.hardware.touchscreen"
         android:required="false" />
 
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.OPEN_DOCUMENT_TREE" />
+        </intent>
+    </queries>
+
     <application
         android:name="me.aap.fermata.FermataApplication"
         android:allowBackup="true"
@@ -50,14 +56,19 @@
             android:resource="@style/AppTheme.Dark" />
 
         <activity
-            android:configChanges="orientation|screenSize|keyboardHidden"
             android:name="me.aap.fermata.ui.activity.MainActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
             android:launchMode="singleTop">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
 
                 <category android:name="android.intent.category.LAUNCHER" />
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+
+            <intent-filter>
+                <action android:name="android.media.action.MEDIA_PLAY_FROM_SEARCH" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
 
@@ -67,8 +78,11 @@
             android:foregroundServiceType="mediaPlayback">
             <intent-filter>
                 <action android:name="android.media.browse.MediaBrowserService" />
-                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+            <intent-filter>
                 <action android:name="android.media.action.MEDIA_PLAY_FROM_SEARCH" />
+            </intent-filter>
+            <intent-filter>
                 <action android:name="me.aap.fermata.action.MediaService" />
                 <action android:name="me.aap.fermata.action.CarMediaService" />
                 <action android:name="me.aap.fermata.action.ControlService" />

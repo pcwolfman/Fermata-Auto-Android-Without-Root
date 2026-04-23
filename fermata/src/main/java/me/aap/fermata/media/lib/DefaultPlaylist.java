@@ -9,6 +9,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 
+import me.aap.fermata.BuildConfig;
 import me.aap.fermata.R;
 import me.aap.fermata.media.lib.MediaLib.BrowsableItem;
 import me.aap.fermata.media.lib.MediaLib.Item;
@@ -33,12 +34,27 @@ class DefaultPlaylist extends ItemContainer<PlayableItem> implements Playlist, P
 	private final int playlistId;
 	private final SharedPreferenceStore playlistPrefStore;
 
-	public DefaultPlaylist(String id, BrowsableItem parent, int playlistId) {
+	private DefaultPlaylist(String id, BrowsableItem parent, int playlistId) {
 		super(id, parent, null);
 		this.playlistId = playlistId;
 		SharedPreferences prefs = getLib().getContext().getSharedPreferences("playlist_" + playlistId,
 				Context.MODE_PRIVATE);
 		playlistPrefStore = SharedPreferenceStore.create(prefs, getLib().getPrefs());
+	}
+
+	public static DefaultPlaylist create(String id, BrowsableItem parent, int playlistId, DefaultMediaLib lib) {
+		synchronized (lib.cacheLock()) {
+			Item i = lib.getFromCache(id);
+
+			if (i != null) {
+				DefaultPlaylist pl = (DefaultPlaylist) i;
+				if (BuildConfig.D && !parent.equals(pl.getParent())) throw new AssertionError();
+				if (BuildConfig.D && !id.equals(pl.getId())) throw new AssertionError();
+				return pl;
+			} else {
+				return new DefaultPlaylist(id, parent, playlistId);
+			}
+		}
 	}
 
 	@Override
@@ -52,6 +68,7 @@ class DefaultPlaylist extends ItemContainer<PlayableItem> implements Playlist, P
 		return completed(getLib().getContext().getResources().getString(R.string.browsable_subtitle, count));
 	}
 
+	@NonNull
 	@Override
 	public String getName() {
 		return getPlaylistNamePref();
@@ -89,7 +106,7 @@ class DefaultPlaylist extends ItemContainer<PlayableItem> implements Playlist, P
 	}
 
 	@Override
-	String getScheme() {
+	protected String getScheme() {
 		return getId();
 	}
 
@@ -101,7 +118,7 @@ class DefaultPlaylist extends ItemContainer<PlayableItem> implements Playlist, P
 	}
 
 	@Override
-	void saveChildren(List<PlayableItem> children) {
+	protected void saveChildren(List<PlayableItem> children) {
 		setPlaylistItemsPref(mapToArray(children, PlayableItem::getOrigId, String[]::new));
 	}
 }

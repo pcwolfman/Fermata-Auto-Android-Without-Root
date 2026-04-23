@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="addons">Дополнения</string>
+    <string name="addon_name_tv">ТВ</string>
     <string name="addon_name_web_browser">Веб браузер</string>
 
     <string name="interface_prefs">Интерфейс</string>
@@ -14,6 +15,13 @@
     <string name="theme_dark">Темная</string>
     <string name="theme_day_night">День/Ночь</string>
     <string name="theme_black">Черная</string>
+
+    <string name="nav_bar_pos">Расположении панели навигации</string>
+    <string name="nav_bar_pos_aa">Расположении панели навигации (Android Auto)</string>
+    <string name="nav_bar_pos_sub">Текущее расположение: %1$s</string>
+    <string name="nav_bar_pos_bottom">Внизу</string>
+    <string name="nav_bar_pos_left">Слева</string>
+    <string name="nav_bar_pos_right">Справа</string>
 
     <string name="hide_bars">Скрывать панели</string>
     <string name="hide_bars_sub">Скрывать верхнюю и нижнюю панель, когда появляется панель управления</string>
@@ -47,6 +55,10 @@
     <string name="preferred_video_engine">Предпочтительный видео движок</string>
     <string name="engine_installed">Медиа движок установлен: %1$s</string>
     <string name="engine_uninstalled">Медиа движок удален: %1$s</string>
+
+    <string name="preferred_media_scanner">Предпочтительный медиа сканнер</string>
+    <string name="preferred_media_scanner_default">По умолчанию</string>
+    <string name="preferred_media_scanner_system">Системный</string>
 
     <string name="module_installation">Установка модуля: %1$s</string>
     <string name="install_pending">Ожидание инсталляции: %1$s</string>
@@ -167,6 +179,12 @@
     <string name="vfs_content">Контент</string>
     <string name="vfs_file_system">Файловая система</string>
     <string name="vfs_gdrive">Google диск</string>
+    <string name="m3u_playlist">M3U плейлист</string>
+    <string name="m3u_playlist_name">Название</string>
+    <string name="m3u_playlist_location">Расположение</string>
+    <string name="m3u_playlist_location_hint">Файл или http(s) URL</string>
+    <string name="m3u_playlist_agent" translatable="false">User-Agent</string>
+    <string name="m3u_playlist_video">Видео плейлист</string>
 
     <string name="eq_manual">Ручные</string>
     <string name="eq_normal">Нормальные</string>
@@ -206,9 +224,9 @@
         с простым и интуитивным интерфейсом.</p>
         <p>Если вам нравится приложение, пожалуйста, рассмотрите
         возможность сделать пожертвование, посетив домашнюю страницу приложения:
-        <a href="%1$s">%2$s</a></p>
         <p><b>Автор:</b> Андрей Павленко</p>
-        <p><b>Версия:</b> %3$s (%4$d)</p>
+        <p><b>Версия:</b> %1$s (%2$d)</p>
+        <p><b>Домашняя страница:</b> <a href="%3$s">%3$s</a></p>
         ]]></string>
 
     <string name="err_failed_to_play">Не удалось воспроизвести %s</string>
@@ -219,4 +237,5 @@
     <string name="err_failed_add_folder">Не удалось добавить директорию: %1$s</string>
     <string name="err_failed_open_url">Не удалось открыть URL: %1$s</string>
     <string name="err_failed_install_module">Не удалось установить модуль: %1$s</string>
+    <string name="err_failed_to_download">Не удалось скачать %1$s</string>
 </resources>

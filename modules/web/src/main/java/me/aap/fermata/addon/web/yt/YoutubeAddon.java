@@ -1,7 +1,7 @@
 package me.aap.fermata.addon.web.yt;
 
 import androidx.annotation.Keep;
-import androidx.annotation.Nullable;
+import androidx.annotation.NonNull;
 
 import me.aap.fermata.addon.web.WebBrowserAddon;
 import me.aap.utils.function.BooleanSupplier;
@@ -16,22 +16,28 @@ import me.aap.utils.ui.fragment.ActivityFragment;
 @SuppressWarnings("unused")
 public class YoutubeAddon extends WebBrowserAddon {
 	private static final Pref<BooleanSupplier> YT_FORCE_DARK = Pref.b("YT_FORCE_DARK", false);
+	private static final Pref<BooleanSupplier> YT_DESKTOP_VERSION = Pref.b("YT_DESKTOP_VERSION", false);
 	private static final Pref<Supplier<String>> VIDEO_SCALE = Pref.s("VIDEO_SCALE", VideoScale.CONTAIN::prefName);
 
 	@Override
-	public int getNavId() {
+	public int getAddonId() {
 		return me.aap.fermata.R.id.youtube_fragment;
 	}
 
-	@Nullable
+	@NonNull
 	@Override
-	public ActivityFragment createFragment(int id) {
-		return (id == me.aap.fermata.R.id.youtube_fragment) ? new YoutubeFragment() : null;
+	public ActivityFragment createFragment() {
+		return new YoutubeFragment();
 	}
 
 	@Override
 	public Pref<BooleanSupplier> getForceDarkPref() {
 		return YT_FORCE_DARK;
+	}
+
+	@Override
+	public Pref<BooleanSupplier> getDesktopVersionPref() {
+		return YT_DESKTOP_VERSION;
 	}
 
 	VideoScale getScale() {

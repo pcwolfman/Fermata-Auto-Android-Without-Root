@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 
 import me.aap.fermata.BuildConfig;
+import me.aap.fermata.addon.AddonManager;
 import me.aap.fermata.media.engine.MediaEngineManager;
 import me.aap.fermata.media.engine.MetadataRetriever;
 import me.aap.fermata.media.pref.BrowsableItemPrefs;
@@ -31,6 +32,7 @@ import me.aap.utils.pref.SharedPreferenceStore;
 import static me.aap.utils.async.Completed.completed;
 import static me.aap.utils.async.Completed.completedEmptyList;
 import static me.aap.utils.async.Completed.completedNull;
+import static me.aap.utils.async.Completed.failed;
 
 /**
  * @author Andrey Pavlenko
@@ -84,7 +86,7 @@ public class DefaultMediaLib extends BasicEventBroadcaster<PreferenceStore.Liste
 
 	@NonNull
 	@Override
-	public FutureSupplier<Item> getItem(CharSequence itemId) {
+	public FutureSupplier<? extends Item> getItem(CharSequence itemId) {
 		String id = itemId.toString();
 		Item i = getFromCache(id);
 		if (i != null) return completed(i);
@@ -100,31 +102,39 @@ public class DefaultMediaLib extends BasicEventBroadcaster<PreferenceStore.Liste
 				case DefaultPlaylists.ID:
 					return completed(getPlaylists());
 				default:
-					return completedNull();
+					FutureSupplier<? extends Item> ai = AddonManager.get().getItem(this, null, id);
+					return (ai != null) ? ai : completedNull();
 			}
 		}
 
-		switch (id.substring(0, idx)) {
-			case FileItem.SCHEME:
-				return FileItem.create(this, id);
-			case FolderItem.SCHEME:
-				return FolderItem.create(this, id);
-			case CueItem.SCHEME:
-				return CueItem.create(this, id);
-			case CueTrackItem.SCHEME:
-				return CueTrackItem.create(this, id);
-			case M3uItem.SCHEME:
-				return M3uItem.create(this, id);
-			case M3uGroupItem.SCHEME:
-				return M3uGroupItem.create(this, id);
-			case M3uTrackItem.SCHEME:
-				return M3uTrackItem.create(this, id);
-			case DefaultFavorites.SCHEME:
-				return getFavorites().getItem(id);
-			case DefaultPlaylists.SCHEME:
-				return getPlaylists().getItem(id);
-			default:
-				return completedNull();
+		try {
+			String scheme = id.substring(0, idx);
+
+			switch (scheme) {
+				case FileItem.SCHEME:
+					return FileItem.create(this, id);
+				case FolderItem.SCHEME:
+					return FolderItem.create(this, id);
+				case CueItem.SCHEME:
+					return CueItem.create(this, id);
+				case CueTrackItem.SCHEME:
+					return CueTrackItem.create(this, id);
+				case M3uItem.SCHEME:
+					return M3uItem.create(this, id);
+				case M3uGroupItem.SCHEME:
+					return M3uGroupItem.create(this, id);
+				case M3uTrackItem.SCHEME:
+					return M3uTrackItem.create(this, id);
+				case DefaultFavorites.SCHEME:
+					return getFavorites().getItem(id);
+				case DefaultPlaylists.SCHEME:
+					return getPlaylists().getItem(id);
+				default:
+					FutureSupplier<? extends Item> ai = AddonManager.get().getItem(this, scheme, id);
+					return (ai != null) ? ai : completedNull();
+			}
+		} catch (Throwable ex) {
+			return failed(ex);
 		}
 	}
 
@@ -292,15 +302,16 @@ public class DefaultMediaLib extends BasicEventBroadcaster<PreferenceStore.Liste
 		}
 	}
 
-	Object cacheLock() {
+	public Object cacheLock() {
 		return itemCache;
 	}
 
 	void addToCache(Item i) {
 		synchronized (itemCache) {
 			clearRefs(itemCache, itemRefQueue);
-			if (BuildConfig.DEBUG && itemCache.containsKey(i.getId())) throw new AssertionError();
-			itemCache.put(i.getId(), new WeakRef<>(i.getId(), i, itemRefQueue));
+			String id = i.getId();
+			if (BuildConfig.D && itemCache.containsKey(id)) throw new AssertionError(id);
+			itemCache.put(id, new WeakRef<>(id, i, itemRefQueue));
 		}
 	}
 
@@ -316,7 +327,7 @@ public class DefaultMediaLib extends BasicEventBroadcaster<PreferenceStore.Liste
 		}
 	}
 
-	Item getFromCache(String id) {
+	public Item getFromCache(String id) {
 		synchronized (itemCache) {
 			clearRefs(itemCache, itemRefQueue);
 			WeakRef<Item> r = itemCache.get(id);
@@ -329,6 +340,13 @@ public class DefaultMediaLib extends BasicEventBroadcaster<PreferenceStore.Liste
 		}
 
 		return null;
+	}
+
+	@Override
+	public void clearCache() {
+		synchronized (itemCache) {
+			clearRefs(itemCache, itemRefQueue);
+		}
 	}
 
 	@SuppressWarnings("rawtypes")

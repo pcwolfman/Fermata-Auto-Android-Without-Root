@@ -1,5 +1,6 @@
 package me.aap.fermata.media.engine;
 
+import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Context;
 import android.database.Cursor;
@@ -7,7 +8,7 @@ import android.database.sqlite.SQLiteDatabase;
 import android.graphics.Bitmap;
 import android.media.MediaMetadata;
 import android.net.Uri;
-import android.os.ParcelFileDescriptor;
+import android.provider.MediaStore;
 import android.support.v4.media.MediaMetadataCompat;
 
 import androidx.annotation.Nullable;
@@ -31,8 +32,13 @@ import me.aap.utils.pref.PreferenceStore.Pref;
 import me.aap.utils.text.SharedTextBuilder;
 import me.aap.utils.text.TextBuilder;
 import me.aap.utils.vfs.VirtualResource;
+import me.aap.utils.vfs.content.ContentFileSystem;
 
+import static me.aap.fermata.media.pref.MediaPrefs.MEDIA_SCANNER_DEFAULT;
+import static me.aap.fermata.media.pref.MediaPrefs.MEDIA_SCANNER_SYSTEM;
+import static me.aap.fermata.media.pref.MediaPrefs.MEDIA_SCANNER_VLC;
 import static me.aap.utils.async.Completed.completedEmptyMap;
+import static me.aap.utils.async.Completed.completedNull;
 import static me.aap.utils.async.Completed.completedVoid;
 
 /**
@@ -53,6 +59,14 @@ public class MetadataRetriever implements Closeable {
 	private static final String COL_ID_PATTERN = COL_ID + " LIKE ? AND NOT " + COL_ID + " LIKE ?";
 	private static final String[] QUERY_COLUMNS = {COL_ID, COL_TITLE, COL_ALBUM, COL_ARTIST,
 			COL_DURATION, COL_ART};
+	private static final String[] CONTENT_COLUMNS = {
+			MediaStore.MediaColumns.TITLE,
+			MediaStore.Audio.AudioColumns.DURATION,
+			MediaStore.Audio.AudioColumns.ARTIST,
+			"album_artist",
+			MediaStore.Audio.AudioColumns.ALBUM,
+			MediaStore.Audio.AudioColumns.COMPOSER,
+			"genre"};
 
 	private final MediaEngineManager mgr;
 	private final BitmapCache bitmapCache;
@@ -102,20 +116,30 @@ public class MetadataRetriever implements Closeable {
 		if (meta != null) return meta;
 
 		MetaBuilder mb = new MetaBuilder();
-		MediaEngineProvider mp = mgr.mediaPlayer;
-		MediaEngineProvider vlc = mgr.vlcPlayer;
 		VirtualResource file = item.getResource();
 
-		if (file.isLocalFile() && file.getName().endsWith(".flac")) {
-			// VLC does not extract images from flac, thus prefer Android extractor for local files
-			if (!mp.getMediaMetadata(mb, item) && (vlc != null)) {
-				// Seems flac is not supported, trying VLC
-				vlc.getMediaMetadata(mb, item);
+		if (file.getVirtualFileSystem() instanceof ContentFileSystem) {
+			if (queryContentProvider(file.getRid().toAndroidUri(), mb)) {
+				try {
+					insertMetadata(mb, item);
+				} catch (Throwable ex) {
+					Log.e(ex, "Failed to update MediaStore");
+				}
+
+				return mb;
 			}
-		} else if (vlc != null) {
-			if (!vlc.getMediaMetadata(mb, item)) mp.getMediaMetadata(mb, item);
-		} else {
-			mp.getMediaMetadata(mb, item);
+		}
+
+		int scanner = (mgr.vlcPlayer == null) ? MEDIA_SCANNER_DEFAULT
+				: item.getLib().getPrefs().getMediaScannerPref();
+
+		switch (scanner) {
+			case MEDIA_SCANNER_DEFAULT:
+			case MEDIA_SCANNER_SYSTEM:
+				if (mgr.mediaPlayer.getMediaMetadata(mb, item)) break;
+				if ((scanner == MEDIA_SCANNER_SYSTEM) && mgr.mediaPlayer.getDuration(mb, item)) break;
+			case MEDIA_SCANNER_VLC:
+				if (mgr.vlcPlayer != null) mgr.vlcPlayer.getMediaMetadata(mb, item);
 		}
 
 		try {
@@ -127,8 +151,69 @@ public class MetadataRetriever implements Closeable {
 		return mb;
 	}
 
+	private boolean queryContentProvider(Uri uri, MetaBuilder mb) {
+		App app = App.get();
+		ContentResolver cr = app.getContentResolver();
+
+		try (Cursor c = cr.query(uri, CONTENT_COLUMNS, null, null, null)) {
+			if ((c == null) || !c.moveToFirst()) return false;
+
+			String m = c.getString(1);
+
+			if ((m != null) && !m.isEmpty()) {
+				try {
+					mb.putLong(MediaMetadata.METADATA_KEY_DURATION, Long.parseLong(m));
+				} catch (NumberFormatException ex) {
+					Log.d(ex);
+					return false;
+				}
+			} else {
+				return false;
+			}
+
+			m = c.getString(0);
+			if (m != null) mb.putString(MediaMetadataCompat.METADATA_KEY_TITLE, m);
+			m = c.getString(2);
+			if (m != null) mb.putString(MediaMetadataCompat.METADATA_KEY_ARTIST, m);
+			m = c.getString(3);
+			if (m != null) mb.putString(MediaMetadataCompat.METADATA_KEY_ALBUM_ARTIST, m);
+			m = c.getString(4);
+			if (m != null) mb.putString(MediaMetadataCompat.METADATA_KEY_ALBUM, m);
+			m = c.getString(5);
+			if (m != null) mb.putString(MediaMetadataCompat.METADATA_KEY_COMPOSER, m);
+			m = c.getString(6);
+			if (m != null) mb.putString(MediaMetadataCompat.METADATA_KEY_GENRE, m);
+
+			mb.setImageUri(uri.toString());
+			return true;
+		} catch (Exception ex) {
+			Log.e(ex, "Failed to query content provider: " + uri);
+			return false;
+		}
+	}
+
 	public FutureSupplier<Map<String, MetadataBuilder>> queryMetadata(String idPattern) {
 		return (db != null) ? queue.enqueue(() -> query(idPattern)) : completedEmptyMap();
+	}
+
+	public FutureSupplier<String> queryId(String pattern) {
+		String[] p = {'%' + pattern + '%'};
+		return (db != null) ? queue.enqueue(() -> {
+			try (Cursor c = db.query(TABLE, new String[]{COL_ID}, COL_TITLE + " LIKE ?  LIMIT 1",
+					p, null, null, null)) {
+				if (c.moveToFirst()) return c.getString(0);
+			}
+			try (Cursor c = db.query(TABLE, new String[]{COL_ID}, COL_ARTIST + " LIKE ?  LIMIT 1",
+					p, null, null, null)) {
+				if (c.moveToFirst()) return c.getString(0);
+			}
+			try (Cursor c = db.query(TABLE, new String[]{COL_ID}, COL_ALBUM + " LIKE ?  LIMIT 1",
+					p, null, null, null)) {
+				if (c.moveToFirst()) return c.getString(0);
+			}
+
+			return null;
+		}) : completedNull();
 	}
 
 	public FutureSupplier<Void> clearMetadata(String idPattern) {
@@ -237,15 +322,6 @@ public class MetadataRetriever implements Closeable {
 
 		values.put(COL_ID, item.getId());
 		db.insert(TABLE, null, values);
-	}
-
-	@SuppressWarnings("unused")
-	private static boolean isBitmapUri(Context ctx, String u, Uri uri) {
-		try (ParcelFileDescriptor fd = ctx.getContentResolver().openFileDescriptor(uri, "r")) {
-			return true;
-		} catch (Exception ex) {
-			return false;
-		}
 	}
 
 	private void createTable() {
